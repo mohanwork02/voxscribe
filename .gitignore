@@ -1,0 +1,114 @@
+# Production-grade ignore list for this repo (Python + Node/React + generated artifacts)
+
+# ==============================
+# Secrets / env
+# ==============================
+.env
+.env.*
+*.env
+!.env.example
+!.env.sample
+!**/.env.example
+!**/.env.sample
+
+# Service account / key material (project-specific)
+login/a.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.der
+*.jks
+*.keystore
+
+# ==============================
+# Python
+# ==============================
+__pycache__/
+*.py[cod]
+*$py.class
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+
+build/
+dist/
+*.egg-info/
+.eggs/
+
+.coverage
+coverage.xml
+htmlcov/
+
+.ipynb_checkpoints/
+
+# Virtual envs
+.venv/
+venv/
+env/
+ENV/
+
+# ==============================
+# Node / frontend
+# ==============================
+**/node_modules/
+**/dist/
+**/dist-ssr/
+**/build/
+**/.cache/
+**/.parcel-cache/
+**/.next/
+**/.nuxt/
+**/.vite/
+**/coverage/
+
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+*.local
+
+# ==============================
+# Project runtime outputs (do not commit)
+# ==============================
+interview_langgraph/artifacts/
+login/uploads/
+
+# Sample/local-only documents
+interview_langgraph/Venkatesh_Updated_CV.pdf
+
+# ==============================
+# Logs
+# ==============================
+logs/
+*.log
+
+# ==============================
+# Deploy platform folders
+# ==============================
+.vercel/
+.netlify/
+.firebase/
+
+# ==============================
+# Editor / OS
+# ==============================
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+*.swp
+*.swo
+*.swn
