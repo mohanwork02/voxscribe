@@ -1,0 +1,100 @@
+# Reduce Docker build context size and prevent shipping secrets/artifacts.
+
+# ------------------------------
+# VCS / IDE / OS
+# ------------------------------
+.git
+.git/*
+.github
+.github/*
+.vscode
+.vscode/*
+.idea
+.idea/*
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ------------------------------
+# Secrets / env / keys
+# ------------------------------
+.env
+.env.*
+*.env
+**/.env
+**/.env.*
+**/*.env
+
+login/a.json
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.crt
+**/*.cer
+**/*.der
+**/*.jks
+**/*.keystore
+
+# ------------------------------
+# Python caches / virtualenvs
+# ------------------------------
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+coverage.xml
+htmlcov/
+
+venv/
+.venv/
+env/
+ENV/
+
+# ------------------------------
+# Node / frontend caches
+# ------------------------------
+node_modules/
+**/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+.npmrc
+.pnpm-store
+.yarn
+.yarn/*
+
+# Built assets (build inside Docker)
+dist/
+**/dist/
+**/dist-ssr/
+build/
+**/build/
+.next/
+**/.next/
+.nuxt/
+**/.nuxt/
+.vite/
+**/.vite/
+coverage/
+**/coverage/
+
+# ------------------------------
+# App runtime/generated data
+# ------------------------------
+login/uploads/
+interview_langgraph/artifacts/
+
+# Sample/local-only documents
+interview_langgraph/Venkatesh_Updated_CV.pdf
+

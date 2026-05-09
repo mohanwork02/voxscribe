@@ -1,0 +1,89 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-voxscribe}
+      POSTGRES_USER: ${POSTGRES_USER:-voxscribe}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your environment or .env}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Required for Smart Input / LangGraph
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY}
+      CHUNK_SIZE: ${CHUNK_SIZE:?Set CHUNK_SIZE (e.g. 1200)}
+      CHUNK_OVERLAP: ${CHUNK_OVERLAP:?Set CHUNK_OVERLAP (e.g. 200)}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:?Set EMBEDDING_MODEL (e.g. text-embedding-3-small)}
+      SELF_INTRO_MODEL: ${SELF_INTRO_MODEL:?Set SELF_INTRO_MODEL (e.g. gpt-4.1-mini)}
+      CHAT_MODEL: ${CHAT_MODEL:?Set CHAT_MODEL (e.g. gpt-4.1-mini)}
+      TOP_K: ${TOP_K:-6}
+
+      # Optional knobs
+      ROUTING_MODE: ${ROUTING_MODE:-llm} # rules|llm
+      RETRIEVAL_MODE: ${RETRIEVAL_MODE:-lexical} # lexical|embedding
+      STREAM_OUTPUT: ${STREAM_OUTPUT:-1}
+      WRITE_VERIFICATION: ${WRITE_VERIFICATION:-0}
+
+      # Google Speech credentials (mount the JSON file via volume below)
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/google_service_account.json
+    volumes:
+      # Persist tenant KB indexes / vectors in the repo folder (so you can inspect them locally)
+      - ./interview_langgraph/artifacts:/app/interview_langgraph/artifacts
+      # Read uploaded documents saved by the web container (Smart Input ingest uses these paths)
+      - web_uploads:/app/login/uploads:ro
+      # Service account JSON (provide host path via GOOGLE_SA_JSON_PATH in root .env)
+      - ${GOOGLE_SA_JSON_PATH:-./secrets/google_service_account.json}:/run/secrets/google_service_account.json:ro
+    ports:
+      - "8000:8000"
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    restart: unless-stopped
+    depends_on:
+      - api
+      - db
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgres://${POSTGRES_USER:-voxscribe}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-voxscribe}
+
+      # Point the Node proxy to the Python API container
+      TRANSCRIPT_BACKEND_URL: http://api:8000
+      PYTHON_BACKEND_URL: http://api:8000
+
+      # Superadmin / email (required for some auth flows)
+      SUPERADMIN_EMAIL: ${SUPERADMIN_EMAIL:-}
+      SUPERADMIN_PASSWORD: ${SUPERADMIN_PASSWORD:-}
+      SUPERADMIN_PASSWORD_HASH: ${SUPERADMIN_PASSWORD_HASH:-}
+
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+    volumes:
+      # Persist user uploads across restarts
+      - web_uploads:/app/login/uploads
+    ports:
+      - "3000:3000"
+
+volumes:
+  db_data:
+  web_uploads:
+  # api_artifacts removed (now bind-mounted to repo)

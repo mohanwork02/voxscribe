@@ -279,9 +279,104 @@ def retrieve_lexical(query: str, texts: list[str], top_k: int = 5) -> list[str]:
         return []
 
     top_k = max(1, int(top_k))
-    q_tokens = {t for t in query.replace("/", " ").replace("-", " ").split() if len(t) >= 3}
+
+    # Tokenization: keep this dependency-free but more robust for short technical queries.
+    normalized = (
+        query.replace("/", " ")
+        .replace("-", " ")
+        .replace("_", " ")
+        .replace(":", " ")
+        .replace(".", " ")
+        .replace(",", " ")
+        .replace(";", " ")
+        .replace("(", " ")
+        .replace(")", " ")
+        .replace("[", " ")
+        .replace("]", " ")
+        .replace("{", " ")
+        .replace("}", " ")
+        .replace("\"", " ")
+        .replace("'", " ")
+    )
+
+    stop = {
+        "the",
+        "and",
+        "for",
+        "with",
+        "from",
+        "this",
+        "that",
+        "are",
+        "was",
+        "were",
+        "what",
+        "when",
+        "where",
+        "why",
+        "how",
+        "you",
+        "your",
+        "about",
+        "into",
+        "have",
+        "has",
+        "had",
+        "can",
+        "could",
+        "should",
+        "would",
+        "will",
+        "also",
+        "than",
+        "then",
+        "them",
+        "they",
+        "their",
+        "there",
+        "here",
+        "just",
+        "like",
+    }
+
+    allow_short = {
+        "ai",
+        "ml",
+        "cv",
+        "ui",
+        "ux",
+        "db",
+        "sql",
+        "api",
+        "id",
+        "js",
+        "ts",
+        "go",
+        "py",
+        "rb",
+        "ci",
+        "cd",
+    }
+
+    raw_tokens = [t for t in normalized.split() if t]
+    q_tokens: set[str] = set()
+    for tok in raw_tokens:
+        if tok in stop:
+            continue
+        if len(tok) >= 3:
+            q_tokens.add(tok)
+            continue
+        if tok in allow_short:
+            q_tokens.add(tok)
+            continue
+        if tok.isdigit():
+            q_tokens.add(tok)
+
+    # If everything was filtered out (very short query), fall back to substring search on the whole query.
     if not q_tokens:
-        return []
+        q_tokens = {query} if query else set()
+        if not q_tokens:
+            return []
 
     scored: list[tuple[int, int]] = []
     for idx, text in enumerate(texts):

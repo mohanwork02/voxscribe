@@ -50,16 +50,16 @@ def _call_llm(
             client=_client,
             model=PROJECT_EXPLAINATION_MODEL,
             messages=messages,
-            temperature=0.2,
-            max_tokens=600,
+            temperature=0.7,
+            max_tokens=3000,
         )
         return answer, streamed
 
     response = _client.chat.completions.create(
         model=PROJECT_EXPLAINATION_MODEL,
         messages=messages,
-        temperature=0.2,
-        max_tokens=600,
+        temperature=0.7,
+        max_tokens=3000,
     )
     return (response.choices[0].message.content or "").strip(), False
 

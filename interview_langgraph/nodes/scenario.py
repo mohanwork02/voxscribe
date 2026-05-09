@@ -70,7 +70,7 @@ def answer_scenario(state: WorkflowState) -> WorkflowState:
                 model=SCENARIO_MODEL,
                 messages=messages,
                 temperature=0.7,
-                max_tokens=5000,
+                max_tokens=3000,
             )
             return {"answer": answer, "streamed": streamed}
 
@@ -78,7 +78,7 @@ def answer_scenario(state: WorkflowState) -> WorkflowState:
             model=SCENARIO_MODEL,
             messages=messages,
             temperature=0.7,
-            max_tokens=5000,
+            max_tokens=3000,
         )
         return {"answer": (response.choices[0].message.content or "").strip(), "streamed": False}
     except Exception:

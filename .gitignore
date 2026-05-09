@@ -13,6 +13,7 @@
 
 # Service account / key material (project-specific)
 login/a.json
+secrets/google_service_account.json
 *.pem
 *.key
 *.p12

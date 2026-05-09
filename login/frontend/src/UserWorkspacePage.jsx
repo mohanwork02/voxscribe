@@ -470,6 +470,8 @@ function UserWorkspacePage() {
   const transcriptFileInputRef = useRef(null);
   const transcriptStreamRef = useRef(null);
   const transcriptStreamClosedRef = useRef(false);
+  const transcriptReconnectAttemptRef = useRef(0);
+  const transcriptReconnectTimerRef = useRef(null);
   const screenStreamRef = useRef(null);
   const screenShareCleanupRef = useRef(null);
   const screenAudioContextRef = useRef(null);
@@ -590,6 +592,11 @@ function UserWorkspacePage() {
     transcriptStreamClosedRef.current = markClosed;
     activeTranscriptSourceRef.current = null;
 
+    if (transcriptReconnectTimerRef.current) {
+      clearTimeout(transcriptReconnectTimerRef.current);
+      transcriptReconnectTimerRef.current = null;
+    }
+
     if (!transcriptStreamRef.current) {
       return;
     }
@@ -598,6 +605,14 @@ function UserWorkspacePage() {
     transcriptStreamRef.current = null;
 
     try {
+      if (
+        sendStopSignal &&
+        transcriptConnection instanceof WebSocket &&
+        transcriptConnection.readyState === WebSocket.OPEN
+      ) {
+        transcriptConnection.send(JSON.stringify({ type: "stop" }));
+      }
+
       if (typeof transcriptConnection.close === "function") {
         transcriptConnection.close();
       }
@@ -640,65 +655,58 @@ function UserWorkspacePage() {
     setInterimTranscript("");
 
     if (!screenShareEnabledRef.current) {
-      setActivityStatus("Connecting to system audio...", "info");
-      transcriptStreamClosedRef.current = false;
-      activeTranscriptSourceRef.current = "system";
-      setIsListening(true);
+      /*
+        "System audio" mode (kept for reference):
+        - Opens an SSE stream at `/api/transcript/stream`.
+        - Requires server-side WASAPI loopback capture (`pyaudiowpatch`), which is Windows-only.
+        - In Linux/Ubuntu Docker deployments it fails, so it is disabled here.
 
-      const tabToken = getOrCreateTabToken();
-      const transcriptStream = new EventSource(`/api/transcript/stream?tabToken=${encodeURIComponent(tabToken)}`);
-      transcriptStreamRef.current = transcriptStream;
+        Previous implementation:
 
-      transcriptStream.onopen = () => {
-        if (!isCurrentTranscriptConnection(transcriptStream)) {
-          return;
-        }
+        setActivityStatus("Connecting to system audio...", "info");
+        transcriptStreamClosedRef.current = false;
+        activeTranscriptSourceRef.current = "system";
+        setIsListening(true);
 
-        setActivityStatus("Live capture started from system audio.", "success");
-      };
+        const tabToken = getOrCreateTabToken();
+        const transcriptStream = new EventSource(`/api/transcript/stream?tabToken=${encodeURIComponent(tabToken)}`);
+        transcriptStreamRef.current = transcriptStream;
 
-      transcriptStream.onmessage = (event) => {
-        if (!isCurrentTranscriptConnection(transcriptStream)) {
-          return;
-        }
+        transcriptStream.onopen = () => {
+          if (!isCurrentTranscriptConnection(transcriptStream)) return;
+          setActivityStatus("Live capture started from system audio.", "success");
+        };
 
-        let payload;
+        transcriptStream.onmessage = (event) => {
+          if (!isCurrentTranscriptConnection(transcriptStream)) return;
+          let payload;
+          try { payload = JSON.parse(event.data); } catch { return; }
+          if (payload?.error) {
+            closeTranscriptStream({ markClosed: true });
+            setFinalTranscript("");
+            setInterimTranscript("");
+            setIsListening(false);
+            setActivityStatus(payload.error, "error");
+            return;
+          }
+          applyTranscriptPayload(payload);
+        };
 
-        try {
-          payload = JSON.parse(event.data);
-        } catch {
-          return;
-        }
-
-        if (payload?.error) {
+        transcriptStream.onerror = () => {
+          if (!isCurrentTranscriptConnection(transcriptStream)) return;
+          const wasClosedManually = transcriptStreamClosedRef.current;
           closeTranscriptStream({ markClosed: true });
           setFinalTranscript("");
           setInterimTranscript("");
           setIsListening(false);
-          setActivityStatus(payload.error, "error");
-          return;
-        }
+          if (!wasClosedManually) {
+            setActivityStatus("System audio transcript stream disconnected.", "error");
+          }
+        };
+      */
 
-        applyTranscriptPayload(payload);
-      };
-
-      transcriptStream.onerror = () => {
-        if (!isCurrentTranscriptConnection(transcriptStream)) {
-          return;
-        }
-
-        const wasClosedManually = transcriptStreamClosedRef.current;
-
-        closeTranscriptStream({ markClosed: true });
-        setFinalTranscript("");
-        setInterimTranscript("");
-        setIsListening(false);
-
-        if (!wasClosedManually) {
-          setActivityStatus("System audio transcript stream disconnected.", "error");
-        }
-      };
-
+      setActivityStatus("Select a browser tab or window with audio to start live transcription.", "info");
+      await handleScreenShare();
       return true;
     }
 
@@ -706,7 +714,7 @@ function UserWorkspacePage() {
 
     if (!screenStreamRef.current) {
       setIsListening(false);
-      setActivityStatus("Share a screen with audio first. Screen mode does not use system audio.", "error");
+      setActivityStatus("Share a browser tab or window with audio first to start transcription.", "error");
       return false;
     }
 
@@ -781,6 +789,7 @@ function UserWorkspacePage() {
           return;
         }
 
+        transcriptReconnectAttemptRef.current = 0;
         transcriptStream.send(
           JSON.stringify({
             sampleRate: audioContext.sampleRate,
@@ -831,6 +840,19 @@ function UserWorkspacePage() {
         setIsListening(false);
 
         if (!wasClosedManually) {
+          const attempt = transcriptReconnectAttemptRef.current + 1;
+          transcriptReconnectAttemptRef.current = attempt;
+
+          if (attempt <= 6 && screenShareEnabledRef.current && screenStreamRef.current) {
+            const delayMs = Math.min(6000, 500 * 2 ** (attempt - 1));
+            setActivityStatus(`Transcript stream disconnected. Reconnecting in ${Math.ceil(delayMs / 1000)}s...`, "info");
+            transcriptReconnectTimerRef.current = setTimeout(() => {
+              transcriptReconnectTimerRef.current = null;
+              void startCapture({ restart: true });
+            }, delayMs);
+            return;
+          }
+
           setActivityStatus("Shared screen audio transcript stream disconnected.", "error");
         }
       };
@@ -1347,12 +1369,12 @@ function UserWorkspacePage() {
       releaseScreenShare(true);
 
       if (wasListening) {
-        setActivityStatus("Screen share disabled. Switching back to system audio.", "info");
+        setActivityStatus("Screen share disabled. Select a source again to resume transcription.", "info");
         await startCapture({ restart: true });
         return;
       }
 
-      setActivityStatus("Screen share disabled. Start will use system audio.", "info");
+      setActivityStatus("Screen share disabled. Start will prompt you to select a source.", "info");
       return;
     }
 
@@ -1437,12 +1459,12 @@ function UserWorkspacePage() {
         setIsListening(false);
 
         if (wasCapturingScreen) {
-          setActivityStatus("Screen share ended. Switching back to system audio.", "info");
+          setActivityStatus("Screen share ended. Select a source again to resume transcription.", "info");
           void startCapture({ restart: true });
           return;
         }
 
-        setActivityStatus("Screen share ended. Start will use system audio until you share again.", "info");
+        setActivityStatus("Screen share ended. Start will prompt you to select a source.", "info");
       };
 
       stream.getTracks().forEach((track) => {
@@ -1471,7 +1493,7 @@ function UserWorkspacePage() {
       const statusType = errorMessage === "Screen share was cancelled." ? "info" : "error";
 
       if (wasListening) {
-        setActivityStatus(`${errorMessage} Continuing with system audio.`, statusType);
+        setActivityStatus(`${errorMessage} Select a tab/window with audio to continue.`, statusType);
         await startCapture({ restart: true });
         return;
       }

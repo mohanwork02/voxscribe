@@ -78,7 +78,7 @@ def generate_introduction(
                 model=SELF_INTRO_MODEL,
                 messages=messages,
                 temperature=0.7,
-                max_tokens=5000,
+                max_tokens=3000,
                 
             )
             return answer, streamed
@@ -87,7 +87,7 @@ def generate_introduction(
             model=SELF_INTRO_MODEL,
             messages=messages,
             temperature=0.7,
-            max_tokens=5000,
+            max_tokens=3000,
             
         )
         return (response.choices[0].message.content or "").strip(), False

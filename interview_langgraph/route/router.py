@@ -1,4 +1,5 @@
 import json
+import logging
 
 from openai import OpenAI
 
@@ -14,6 +15,7 @@ from interview_langgraph.state import WorkflowState
 
 
 _client = None
+logger = logging.getLogger(__name__)
 
 
 def _looks_like_code_query(query: str) -> bool:
@@ -57,6 +59,12 @@ def _looks_like_intro_query(query: str) -> bool:
         "about me",
         "self introduction",
         "self-introduction",
+        "what is your name",
+        "what's your name",
+        "your name",
+        "how many years of experience",
+        "years of experience",
+        "total experience",
         "resume",
         "cv",
         "my experience",
@@ -117,8 +125,8 @@ def route_node(state: WorkflowState) -> WorkflowState:
         return {"route": "end"}
 
     history = state.get("history")
-    # If OpenAI is not configured (key/proxy), fall back to deterministic routing.
-    if get_openai_setup_issues():
+
+    def deterministic_route() -> WorkflowState:
         # In offline mode, include a small amount of prior context for better follow-ups.
         combined = query
         hist = coerce_history(history)
@@ -134,6 +142,18 @@ def route_node(state: WorkflowState) -> WorkflowState:
         if _looks_like_project_query(combined):
             return {"route": "project_explaination"}
         return {"route": "qa"}
+
+    # Honour explicit routing mode preference.
+    if ROUTING_MODE == "rules":
+        result = deterministic_route()
+        logger.info("Router decision mode=rules route=%s", str(result.get("route") or ""))
+        return result
+
+    # If OpenAI is not configured (key/proxy), fall back to deterministic routing.
+    if get_openai_setup_issues():
+        result = deterministic_route()
+        logger.info("Router decision mode=fallback route=%s", str(result.get("route") or ""))
+        return result
 
     _client = _client or OpenAI()
     system_prompt = read_prompt(ROUTER_PROMPT_PATH)
@@ -156,4 +176,5 @@ def route_node(state: WorkflowState) -> WorkflowState:
 
     if route not in {"introduction", "project_explaination", "code", "scenario", "qa"}:
         route = "qa"
+    logger.info("Router decision mode=llm route=%s", route)
     return {"route": route}

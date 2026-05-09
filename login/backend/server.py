@@ -1,11 +1,12 @@
 import asyncio
 import json
 import logging
+import os
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from queue import Empty, Queue
+from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
 from uuid import uuid4
 
@@ -16,6 +17,8 @@ from stt_loopback import stream_transcripts, stream_transcripts_from_audio_queue
 
 logger = logging.getLogger(__name__)
 HEARTBEAT_SECONDS = 15
+STT_AUDIO_QUEUE_MAX_CHUNKS = int(os.getenv("STT_AUDIO_QUEUE_MAX_CHUNKS", "250"))
+STT_AUDIO_QUEUE_DROP_BATCH = int(os.getenv("STT_AUDIO_QUEUE_DROP_BATCH", "25"))
 ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
@@ -53,12 +56,40 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _preview_query(value: str, *, limit: int = 160) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)] + "…"
+
+
 def _get_tenant_context_from_headers(headers) -> tuple[str, str]:
     tenant_id = str(getattr(headers, "get", lambda *_: "")(TENANT_HEADER) or "").strip()
     user_id = str(getattr(headers, "get", lambda *_: "")(USER_HEADER) or "").strip()
     if not tenant_id or not user_id:
         raise HTTPException(status_code=401, detail="Missing tenant context.")
     return tenant_id, user_id
+
+
+def _push_audio_chunk(queue: Queue, payload: bytes | None, *, label: str) -> int:
+    try:
+        queue.put_nowait(payload)
+        return 0
+    except Full:
+        dropped = 0
+        for _ in range(max(1, STT_AUDIO_QUEUE_DROP_BATCH)):
+            try:
+                queue.get_nowait()
+                dropped += 1
+            except Empty:
+                break
+        try:
+            queue.put_nowait(payload)
+        except Full:
+            pass
+        if dropped:
+            logger.warning("STT audio queue overflow label=%s dropped=%s qsize=%s", label, dropped, queue.qsize())
+        return dropped
 
 
 def _configure_tenant_artifacts_dir(*, tenant_id: str, user_id: str) -> Path:
@@ -185,6 +216,62 @@ def _build_context_chunks(*, query: str, top_k: int) -> list[str]:
         return []
 
 
+def _build_intro_context_chunks(*, query: str, top_k: int) -> list[str]:
+    """
+    Intro queries like "Introduce yourself" are often too generic for lexical search.
+    Match `interview_langgraph/nodes/introduction.py` behavior by seeding common resume sections.
+    """
+    try:
+        from smart_input_llm import load_faiss, retrieve_lexical
+
+        index, texts = load_faiss()
+    except Exception:
+        return []
+
+    chunks = _build_context_chunks(query=query, top_k=top_k)
+    if chunks:
+        return chunks
+
+    seeds = (
+        "professional summary",
+        "summary",
+        "profile",
+        "about me",
+        "experience",
+        "work history",
+        "work experience",
+        "skills",
+        "education",
+        "projects",
+        "certifications",
+        "achievements",
+        "objective",
+        "name",
+        "years of experience",
+    )
+
+    seeded: list[str] = []
+    per_seed = max(1, top_k // 2)
+    for seed in seeds:
+        try:
+            seeded.extend(retrieve_lexical(seed, texts, top_k=per_seed))
+        except Exception:
+            continue
+
+    # de-dupe keep order
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in seeded:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+        if len(out) >= top_k:
+            break
+
+    return out or texts[:top_k]
+
+
 def _sse_event(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
@@ -295,6 +382,14 @@ async def stream_smart_input_query(request: Request):
             route = str(route_node({"query": query, "history": history}).get("route") or "qa").strip().lower()
             if route not in {"introduction", "project_explaination", "code", "scenario", "qa"}:
                 route = "qa"
+            logger.info(
+                "SmartInput stream route=%s tenant=%s user=%s top_k=%s query=%s",
+                route,
+                tenant_id,
+                user_id,
+                top_k_value,
+                _preview_query(query),
+            )
             yield _sse_event({"type": "route", "route": route})
 
             # If the caller provided KB files, ensure the local index is built for them before retrieval.
@@ -304,25 +399,38 @@ async def stream_smart_input_query(request: Request):
                     _run_llm_query(query="", files=files, top_k=top_k_value)
 
             context_chunks: list[str] = []
-            if route in {"introduction", "project_explaination", "scenario", "qa"}:
+            if route in {"introduction", "project_explaination", "scenario", "qa", "code"}:
                 with _tenant_io_lock:
                     _configure_tenant_artifacts_dir(tenant_id=tenant_id, user_id=user_id)
-                    context_chunks = _build_context_chunks(query=query, top_k=top_k_value)
+                    if route == "introduction":
+                        context_chunks = _build_intro_context_chunks(query=query, top_k=top_k_value)
+                    else:
+                        context_chunks = _build_context_chunks(query=query, top_k=top_k_value)
+            logger.info(
+                "SmartInput retrieval route=%s tenant=%s user=%s chunks=%s",
+                route,
+                tenant_id,
+                user_id,
+                len(context_chunks),
+            )
             context = "\n\n".join(context_chunks).strip()
 
             messages: list[dict[str, str]] = []
             model = QA_MODEL
-            temperature = 0.5
-            max_tokens = 1000
+            temperature = 0.7
+            max_tokens = 3000
 
             if route == "code":
                 system_prompt = read_prompt(CODE_PROMPT_PATH)
                 messages = [{"role": "system", "content": system_prompt}]
                 messages.extend(coerce_history(history))
-                messages.append({"role": "user", "content": query})
+                if context:
+                    messages.append({"role": "user", "content": f"Reference context:\n{context}\n\nQuestion:\n{query}"})
+                else:
+                    messages.append({"role": "user", "content": query})
                 model = CODE_MODEL
                 temperature = 0.7
-                max_tokens = 5000
+                max_tokens = 3000
             elif route == "introduction":
                 sections = read_prompt_sections(INTRO_PROMPT_PATH)
                 system_prompt = sections.get("system") or ""
@@ -332,7 +440,7 @@ async def stream_smart_input_query(request: Request):
                 messages.append({"role": "user", "content": user_template.format(context=context, query=query)})
                 model = SELF_INTRO_MODEL
                 temperature = 0.7
-                max_tokens = 5000
+                max_tokens = 3000
             elif route == "project_explaination":
                 sections = read_prompt_sections(PROJECT_EXPLAINATION_PROMPT_PATH)
                 system_prompt = sections.get("system") or ""
@@ -341,8 +449,8 @@ async def stream_smart_input_query(request: Request):
                 messages.extend(coerce_history(history))
                 messages.append({"role": "user", "content": user_template.format(context=context, query=query)})
                 model = PROJECT_EXPLAINATION_MODEL
-                temperature = 0.2
-                max_tokens = 600
+                temperature = 0.7
+                max_tokens = 3000
             elif route == "scenario":
                 sections = read_prompt_sections(SCENARIO_PROMPT_PATH)
                 system_prompt = sections.get("system") or ""
@@ -352,7 +460,7 @@ async def stream_smart_input_query(request: Request):
                 messages.append({"role": "user", "content": user_template.format(context=context, query=query)})
                 model = SCENARIO_MODEL
                 temperature = 0.7
-                max_tokens = 5000
+                max_tokens = 3000
             else:
                 sections = read_prompt_sections(QA_PROMPT_PATH)
                 system_prompt = sections.get("system") or ""
@@ -361,8 +469,8 @@ async def stream_smart_input_query(request: Request):
                 messages.extend(coerce_history(history))
                 messages.append({"role": "user", "content": user_template.format(context=context, query=query)})
                 model = QA_MODEL
-                temperature = 0.5
-                max_tokens = 1000
+                temperature = 0.7
+                max_tokens = 3000
 
             answer_parts: list[str] = []
             for delta in _iter_openai_chat_deltas(
@@ -387,8 +495,6 @@ async def stream_smart_input_query(request: Request):
             "X-Accel-Buffering": "no",
         },
     )
-
-
 def get_transcript_session(session_id: str, *, tenant_id: str, user_id: str) -> dict:
     with transcript_sessions_lock:
         session = transcript_sessions.get(session_id)
@@ -422,7 +528,7 @@ def stop_transcript_session(
         transcript_sessions.pop(session_id, None)
 
     session["stop_event"].set()
-    session["audio_queue"].put(None)
+    _push_audio_chunk(session["audio_queue"], None, label=f"session:{session_id}")
     session["worker"].join(timeout=join_timeout)
     logger.info("Transcript session stopped: %s", session_id)
     return True
@@ -461,6 +567,15 @@ async def create_smart_input_query(request: Request):
     created_iso = _utc_now_iso()
     created_ts = time.time()
 
+    logger.info(
+        "SmartInput query start id=%s tenant=%s user=%s top_k=%s query=%s",
+        query_id,
+        tenant_id,
+        user_id,
+        top_k,
+        _preview_query(query),
+    )
+
     def worker():
         try:
             with _tenant_io_lock:
@@ -468,6 +583,13 @@ async def create_smart_input_query(request: Request):
                 result = _run_llm_query(query=query, files=files, top_k=top_k)
             answer = str(result.get("answer") or "").strip()
             route = str(result.get("route") or "").strip()
+            logger.info(
+                "SmartInput query done id=%s route=%s tenant=%s user=%s",
+                query_id,
+                route or "-",
+                tenant_id,
+                user_id,
+            )
             with llm_jobs_lock:
                 job = llm_jobs.get(query_id)
                 if job is None:
@@ -550,10 +672,11 @@ async def create_transcript_session(request: Request):
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="Invalid audio stream configuration.")
 
-    audio_queue: Queue[bytes | None] = Queue()
+    audio_queue: Queue[bytes | None] = Queue(maxsize=STT_AUDIO_QUEUE_MAX_CHUNKS)
     result_queue: Queue[dict] = Queue()
     stop_event = Event()
     session_id = uuid4().hex
+    label = f"session:{session_id}"
 
     def producer():
         try:
@@ -562,6 +685,7 @@ async def create_transcript_session(request: Request):
                 sample_rate=sample_rate,
                 channels=channels,
                 stop_event=stop_event,
+                log_context={"session_id": session_id, "tenant_id": tenant_id, "user_id": user_id, "conn_id": label},
             ):
                 if stop_event.is_set():
                     break
@@ -585,7 +709,15 @@ async def create_transcript_session(request: Request):
         }
 
     worker.start()
-    logger.info("Transcript session started: %s", session_id)
+    logger.info(
+        "Transcript session started id=%s tenant=%s user=%s sample_rate=%s channels=%s qmax=%s",
+        session_id,
+        tenant_id,
+        user_id,
+        sample_rate,
+        channels,
+        STT_AUDIO_QUEUE_MAX_CHUNKS,
+    )
     return {"success": True, "sessionId": session_id}
 
 
@@ -601,8 +733,8 @@ async def upload_transcript_audio(session_id: str, request: Request):
     if session["stop_event"].is_set():
         raise HTTPException(status_code=410, detail="Transcript session is no longer active.")
 
-    session["audio_queue"].put(audio_payload)
-    return {"success": True}
+    dropped = _push_audio_chunk(session["audio_queue"], audio_payload, label=f"session:{session_id}")
+    return {"success": True, "dropped": dropped}
 
 
 @app.post("/api/transcript/sessions/{session_id}/stop")
@@ -734,6 +866,10 @@ async def transcript_stream(request: Request):
 @app.websocket("/api/transcript/ws")
 async def transcript_websocket(websocket: WebSocket):
     tenant_id, user_id = _get_tenant_context_from_headers(websocket.headers)
+    tab_token = str(websocket.query_params.get("tabToken") or "").strip()
+    conn_id = tab_token or uuid4().hex[:10]
+    label = f"ws:{conn_id}"
+    client_host = getattr(getattr(websocket, "client", None), "host", "") or "-"
     await websocket.accept()
 
     init_message = await websocket.receive_text()
@@ -747,7 +883,7 @@ async def transcript_websocket(websocket: WebSocket):
         await websocket.close(code=1003)
         return
 
-    audio_queue: Queue[bytes | None] = Queue()
+    audio_queue: Queue[bytes | None] = Queue(maxsize=STT_AUDIO_QUEUE_MAX_CHUNKS)
     result_queue: Queue[dict] = Queue()
     stop_event = Event()
 
@@ -758,6 +894,11 @@ async def transcript_websocket(websocket: WebSocket):
                 sample_rate=sample_rate,
                 channels=channels,
                 stop_event=stop_event,
+                log_context={
+                    "conn_id": conn_id,
+                    "tenant_id": tenant_id,
+                    "user_id": user_id,
+                },
             ):
                 if stop_event.is_set():
                     break
@@ -778,7 +919,7 @@ async def transcript_websocket(websocket: WebSocket):
                     break
 
                 if message.get("bytes") is not None:
-                    audio_queue.put(message["bytes"])
+                    _push_audio_chunk(audio_queue, message["bytes"], label=label)
                 elif message.get("text"):
                     try:
                         control = json.loads(message["text"])
@@ -791,9 +932,18 @@ async def transcript_websocket(websocket: WebSocket):
             logger.info("Transcript websocket client disconnected")
         finally:
             stop_event.set()
-            audio_queue.put(None)
+            _push_audio_chunk(audio_queue, None, label=label)
 
-    logger.info("Transcript websocket started")
+    logger.info(
+        "Transcript websocket started label=%s tenant=%s user=%s client=%s sample_rate=%s channels=%s qmax=%s",
+        label,
+        tenant_id,
+        user_id,
+        client_host,
+        sample_rate,
+        channels,
+        STT_AUDIO_QUEUE_MAX_CHUNKS,
+    )
     worker = Thread(target=producer, daemon=True)
     receiver_task = asyncio.create_task(receive_audio())
     worker.start()
@@ -809,22 +959,29 @@ async def transcript_websocket(websocket: WebSocket):
                 continue
 
             if message["type"] == "transcript":
-                await websocket.send_text(json.dumps(message["payload"]))
+                try:
+                    await websocket.send_text(json.dumps(message["payload"]))
+                except Exception as exc:
+                    logger.info("Transcript websocket send failed label=%s err=%s", label, exc)
+                    break
                 continue
 
             if message["type"] == "error":
-                await websocket.send_text(json.dumps(message["payload"]))
+                try:
+                    await websocket.send_text(json.dumps(message["payload"]))
+                except Exception:
+                    pass
                 break
 
             if message["type"] == "done":
                 break
     finally:
         stop_event.set()
-        audio_queue.put(None)
+        _push_audio_chunk(audio_queue, None, label=label)
         await receiver_task
         worker.join(timeout=1)
         try:
             await websocket.close()
         except RuntimeError:
             logger.debug("Transcript websocket already closed")
-        logger.info("Transcript websocket stopped")
+        logger.info("Transcript websocket stopped label=%s", label)

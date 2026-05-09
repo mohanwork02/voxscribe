@@ -1,0 +1,24 @@
+# Docker/production requirements for this repo.
+# Excludes Windows-only audio loopback deps (pyaudiowpatch) and demo-only tools (streamlit).
+
+# --- Python backend (FastAPI) ---
+python-dotenv
+uvicorn
+fastapi
+websockets
+
+# Audio dependencies (Linux)
+pyaudio
+
+# Google Speech (used by transcript backend)
+google-cloud-speech
+google-api-core
+grpcio
+
+# --- LangGraph / Smart Input ---
+openai>=1.0.0
+langgraph>=0.2.0
+langchain-text-splitters>=0.2.0
+numpy>=1.24
+pypdf>=4.0.0
+python-docx>=1.1.0
