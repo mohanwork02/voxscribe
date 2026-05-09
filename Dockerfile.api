@@ -1,39 +1,78 @@
 # syntax=docker/dockerfile:1.7
 
+# -------------------------
+# Builder stage
+# -------------------------
+FROM python:3.11-slim AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /build
+
+# Build deps only for compiling Python packages like pyaudio
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+     build-essential \
+     portaudio19-dev \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.docker.txt ./
+
+RUN pip wheel --no-cache-dir --wheel-dir /wheels -r requirements.docker.txt
+
+
+# -------------------------
+# Runtime stage
+# -------------------------
 FROM python:3.11-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONPATH=/app:/app/login/backend
 
 WORKDIR /app
 
-# System deps (needed for pyaudio wheels/build)
+# Runtime deps only
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends build-essential portaudio19-dev \
+  && apt-get install -y --no-install-recommends \
+     gosu \
+     bash \
+     ca-certificates \
+     libportaudio2 \
   && rm -rf /var/lib/apt/lists/*
 
-# Install runtime dependencies first (better layer caching)
+# Install Python dependencies from built wheels
 COPY requirements.docker.txt ./
-RUN pip install --no-cache-dir -r requirements.docker.txt
+COPY --from=builder /wheels /wheels
 
-# Use gosu to drop privileges after fixing volume permissions.
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends gosu \
-  && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir --no-index --find-links=/wheels -r requirements.docker.txt \
+  && rm -rf /wheels
 
 # Copy application code
 COPY interview_langgraph/ ./interview_langgraph/
 COPY login/backend/ ./login/backend/
 
-# Runtime writable directory for tenant artifacts (mount a volume here in production)
-RUN mkdir -p ./interview_langgraph/artifacts && useradd -m app
+# Copy entrypoint
+COPY docker/entrypoint-api.sh /usr/local/bin/voxscribe-entrypoint
 
-# Entry point fixes volume ownership then drops privileges.
-COPY --chmod=755 docker/entrypoint-api.sh /usr/local/bin/voxscribe-entrypoint
+# Create app user, fix Windows CRLF, permissions, and writable folders
+RUN useradd -m -u 10001 app \
+  && mkdir -p /app/interview_langgraph/artifacts \
+  && sed -i 's/\r$//' /usr/local/bin/voxscribe-entrypoint \
+  && chmod 0755 /usr/local/bin/voxscribe-entrypoint \
+  && chown -R app:app /app/interview_langgraph/artifacts \
+  && ls -la /usr/local/bin/voxscribe-entrypoint \
+  && head -n 5 /usr/local/bin/voxscribe-entrypoint
 
 USER root
+
 EXPOSE 8000
 
 WORKDIR /app/login/backend
-ENTRYPOINT ["voxscribe-entrypoint"]
+
+ENTRYPOINT ["/usr/local/bin/voxscribe-entrypoint"]
+
 CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000"]

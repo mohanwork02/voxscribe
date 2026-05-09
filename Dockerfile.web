@@ -1,9 +1,10 @@
 # syntax=docker/dockerfile:1.7
 
 # ----------------------------
-# Frontend build (Vite/React)
+# Frontend build: Vite / React
 # ----------------------------
 FROM node:20-bookworm AS frontend-build
+
 WORKDIR /app/login/frontend
 
 COPY login/frontend/package.json login/frontend/package-lock.json ./
@@ -12,39 +13,54 @@ RUN npm ci
 COPY login/frontend/ ./
 RUN npm run build
 
+
 # ----------------------------
-# Backend deps (Express server)
+# Server dependencies: Express
 # ----------------------------
 FROM node:20-bookworm-slim AS server-deps
+
+ENV NODE_ENV=production
+
 WORKDIR /app/login
 
 COPY login/package.json login/package-lock.json ./
 RUN npm ci --omit=dev
 
+
 # ----------------------------
 # Runtime image
 # ----------------------------
 FROM node:20-bookworm-slim AS runtime
+
 ENV NODE_ENV=production
+
 WORKDIR /app/login
 
-COPY --from=server-deps /app/login/node_modules ./node_modules
-COPY login/server.js login/db.js ./
-COPY --from=frontend-build /app/login/frontend/dist ./frontend/dist
-
-# Runtime writable directory (mount a volume here in production)
-RUN mkdir -p ./uploads
-
-# Use gosu to drop privileges after fixing volume permissions.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends gosu \
+  && apt-get install -y --no-install-recommends \
+     gosu \
+     ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
-COPY --chmod=755 docker/entrypoint-web.sh /usr/local/bin/voxscribe-entrypoint
+COPY --from=server-deps /app/login/node_modules ./node_modules
+
+COPY login/server.js login/db.js ./
+
+COPY --from=frontend-build /app/login/frontend/dist ./frontend/dist
+
+COPY docker/entrypoint-web.sh /usr/local/bin/voxscribe-entrypoint
+
+RUN mkdir -p /app/login/uploads \
+  && sed -i 's/\r$//' /usr/local/bin/voxscribe-entrypoint \
+  && chmod 0755 /usr/local/bin/voxscribe-entrypoint \
+  && chown -R node:node /app/login/uploads \
+  && ls -la /usr/local/bin/voxscribe-entrypoint \
+  && head -n 5 /usr/local/bin/voxscribe-entrypoint
 
 USER root
+
 EXPOSE 3000
 
-# Avoid `npm start` to skip `prestart` rebuilding the frontend at container start.
-ENTRYPOINT ["voxscribe-entrypoint"]
+ENTRYPOINT ["/usr/local/bin/voxscribe-entrypoint"]
+
 CMD ["node", "server.js"]
