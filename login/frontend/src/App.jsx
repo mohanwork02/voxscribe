@@ -1,23 +1,98 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import UserWorkspacePage from "./UserWorkspacePage";
 import { apiJson, formatDateTime, usePageMeta } from "./app-shared";
 
+const THEME_STORAGE_KEY = "voxscribe-ui-theme";
+
+function isSupportedTheme(theme) {
+  return theme === "light" || theme === "dark";
+}
+
+function getSystemTheme() {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    return "light";
+  }
+
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function getInitialTheme() {
+  if (typeof window === "undefined") {
+    return "light";
+  }
+
+  const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
+  return isSupportedTheme(storedTheme) ? storedTheme : getSystemTheme();
+}
+
+function applyTheme(theme) {
+  if (typeof document === "undefined") {
+    return;
+  }
+
+  const normalizedTheme = isSupportedTheme(theme) ? theme : "light";
+  document.documentElement.dataset.theme = normalizedTheme;
+  document.documentElement.style.colorScheme = normalizedTheme;
+}
+
 function App() {
+  const [theme, setTheme] = useState(getInitialTheme);
   const path = window.location.pathname;
 
+  useLayoutEffect(() => {
+    applyTheme(theme);
+    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+  }, [theme]);
+
+  useEffect(() => {
+    const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
+    if (isSupportedTheme(storedTheme) || typeof window.matchMedia !== "function") {
+      return undefined;
+    }
+
+    const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+    const handleChange = (event) => {
+      setTheme(event.matches ? "dark" : "light");
+    };
+
+    if (typeof mediaQuery.addEventListener === "function") {
+      mediaQuery.addEventListener("change", handleChange);
+      return () => mediaQuery.removeEventListener("change", handleChange);
+    }
+
+    mediaQuery.addListener(handleChange);
+    return () => mediaQuery.removeListener(handleChange);
+  }, []);
+
+  const handleThemeToggle = () => {
+    setTheme((currentTheme) => (currentTheme === "dark" ? "light" : "dark"));
+  };
+
+  let page = <RegularLoginPage />;
+
   if (path === "/superadmin-login") {
-    return <SuperAdminLoginPage />;
+    page = <SuperAdminLoginPage />;
+  } else if (path === "/app") {
+    page = <UserWorkspacePage />;
+  } else if (path === "/admin") {
+    page = <AdminPage />;
   }
 
-  if (path === "/app") {
-    return <UserWorkspacePage />;
-  }
-
-  if (path === "/admin") {
-    return <AdminPage />;
-  }
-
-  return <RegularLoginPage />;
+  return (
+    <>
+      {page}
+      <button
+        type="button"
+        className="theme-toggle-btn"
+        onClick={handleThemeToggle}
+        aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+        title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+      >
+        <span className="theme-toggle-btn-label">Theme</span>
+        <span className="theme-toggle-btn-value">{theme === "dark" ? "Dark" : "Light"}</span>
+      </button>
+    </>
+  );
 }
 
 function AuthScene({ children }) {

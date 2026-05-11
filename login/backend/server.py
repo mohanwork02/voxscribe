@@ -15,6 +15,25 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from stt_loopback import stream_transcripts, stream_transcripts_from_audio_queue
 
+
+def _configure_app_logging() -> None:
+    level_name = str(os.getenv("LOG_LEVEL") or "INFO").strip().upper()
+    level = getattr(logging, level_name, logging.INFO)
+    root_logger = logging.getLogger()
+
+    if not root_logger.handlers:
+        logging.basicConfig(
+            level=level,
+            format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        )
+    else:
+        root_logger.setLevel(level)
+
+    logging.getLogger("login.backend").setLevel(level)
+    logging.getLogger("interview_langgraph").setLevel(level)
+
+
+_configure_app_logging()
 logger = logging.getLogger(__name__)
 HEARTBEAT_SECONDS = 15
 STT_AUDIO_QUEUE_MAX_CHUNKS = int(os.getenv("STT_AUDIO_QUEUE_MAX_CHUNKS", "250"))
@@ -163,115 +182,6 @@ def _run_llm_query(*, query: str, files: list[str], top_k: int | None = None) ->
     return final_state or {}
 
 
-def _iter_openai_chat_deltas(
-    *,
-    model: str,
-    messages: list[dict[str, str]],
-    temperature: float,
-    max_tokens: int,
-):
-    """
-    Yield incremental text deltas from the OpenAI Chat Completions streaming API.
-    """
-    from openai import OpenAI
-
-    client = OpenAI()
-    stream = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        stream=True,
-    )
-
-    for chunk in stream:
-        try:
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-            text = getattr(delta, "content", None)
-        except Exception:
-            text = None
-        if text:
-            yield str(text)
-
-
-def _build_context_chunks(*, query: str, top_k: int) -> list[str]:
-    """
-    Best-effort KB retrieval using the existing local index (if present).
-    Mirrors the same retrieval logic used by the LangGraph nodes.
-    """
-    try:
-        from interview_langgraph.config import RETRIEVAL_MODE, get_openai_setup_issues
-        from smart_input_llm import load_faiss, retrieve, retrieve_lexical
-    except Exception:
-        return []
-
-    try:
-        index, texts = load_faiss()
-        if RETRIEVAL_MODE == "embedding" and not get_openai_setup_issues():
-            return retrieve(query, index, texts, top_k=top_k)
-        return retrieve_lexical(query, texts, top_k=top_k)
-    except Exception:
-        return []
-
-
-def _build_intro_context_chunks(*, query: str, top_k: int) -> list[str]:
-    """
-    Intro queries like "Introduce yourself" are often too generic for lexical search.
-    Match `interview_langgraph/nodes/introduction.py` behavior by seeding common resume sections.
-    """
-    try:
-        from smart_input_llm import load_faiss, retrieve_lexical
-
-        index, texts = load_faiss()
-    except Exception:
-        return []
-
-    chunks = _build_context_chunks(query=query, top_k=top_k)
-    if chunks:
-        return chunks
-
-    seeds = (
-        "professional summary",
-        "summary",
-        "profile",
-        "about me",
-        "experience",
-        "work history",
-        "work experience",
-        "skills",
-        "education",
-        "projects",
-        "certifications",
-        "achievements",
-        "objective",
-        "name",
-        "years of experience",
-    )
-
-    seeded: list[str] = []
-    per_seed = max(1, top_k // 2)
-    for seed in seeds:
-        try:
-            seeded.extend(retrieve_lexical(seed, texts, top_k=per_seed))
-        except Exception:
-            continue
-
-    # de-dupe keep order
-    out: list[str] = []
-    seen: set[str] = set()
-    for item in seeded:
-        if not item or item in seen:
-            continue
-        seen.add(item)
-        out.append(item)
-        if len(out) >= top_k:
-            break
-
-    return out or texts[:top_k]
-
-
 def _sse_event(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
@@ -354,135 +264,46 @@ async def stream_smart_input_query(request: Request):
         try:
             _ensure_repo_root_on_path()
 
-            from interview_langgraph.config import (
-                CODE_MODEL,
-                CODE_PROMPT_PATH,
-                INTRO_PROMPT_PATH,
-                PROJECT_EXPLAINATION_MODEL,
-                PROJECT_EXPLAINATION_PROMPT_PATH,
-                QA_MODEL,
-                QA_PROMPT_PATH,
-                SCENARIO_MODEL,
-                SCENARIO_PROMPT_PATH,
-                SELF_INTRO_MODEL,
-                get_env_int,
-                get_openai_setup_issues,
+            from interview_langgraph.answer_runtime import (
+                iter_openai_chat_deltas,
+                prepare_answer_request,
             )
-            from interview_langgraph.memory import coerce_history
-            from interview_langgraph.prompt_loader import read_prompt, read_prompt_sections
-            from interview_langgraph.route.router import route_node
-
-            issues = get_openai_setup_issues()
-            if issues:
-                yield _sse_event({"type": "error", "error": "Cannot call LLM API:\n- " + "\n- ".join(issues)})
-                return
-
-            top_k_value = int(top_k if top_k is not None else get_env_int("TOP_K"))
-
-            route = str(route_node({"query": query, "history": history}).get("route") or "qa").strip().lower()
-            if route not in {"introduction", "project_explaination", "code", "scenario", "qa"}:
-                route = "qa"
-            logger.info(
-                "SmartInput stream route=%s tenant=%s user=%s top_k=%s query=%s",
-                route,
-                tenant_id,
-                user_id,
-                top_k_value,
-                _preview_query(query),
-            )
-            yield _sse_event({"type": "route", "route": route})
 
             # If the caller provided KB files, ensure the local index is built for them before retrieval.
             with _tenant_io_lock:
                 _configure_tenant_artifacts_dir(tenant_id=tenant_id, user_id=user_id)
                 if files:
-                    _run_llm_query(query="", files=files, top_k=top_k_value)
+                    _run_llm_query(query="", files=files, top_k=top_k)
+                prepared = prepare_answer_request(query=query, history=history, top_k=top_k)
 
-            context_chunks: list[str] = []
-            if route in {"introduction", "project_explaination", "scenario", "qa", "code"}:
-                with _tenant_io_lock:
-                    _configure_tenant_artifacts_dir(tenant_id=tenant_id, user_id=user_id)
-                    if route == "introduction":
-                        context_chunks = _build_intro_context_chunks(query=query, top_k=top_k_value)
-                    else:
-                        context_chunks = _build_context_chunks(query=query, top_k=top_k_value)
             logger.info(
                 "SmartInput retrieval route=%s tenant=%s user=%s chunks=%s",
-                route,
+                prepared.route,
                 tenant_id,
                 user_id,
-                len(context_chunks),
+                len(prepared.context_chunks),
             )
-            context = "\n\n".join(context_chunks).strip()
-
-            messages: list[dict[str, str]] = []
-            model = QA_MODEL
-            temperature = 0.7
-            max_tokens = 3000
-
-            if route == "code":
-                system_prompt = read_prompt(CODE_PROMPT_PATH)
-                messages = [{"role": "system", "content": system_prompt}]
-                messages.extend(coerce_history(history))
-                if context:
-                    messages.append({"role": "user", "content": f"Reference context:\n{context}\n\nQuestion:\n{query}"})
-                else:
-                    messages.append({"role": "user", "content": query})
-                model = CODE_MODEL
-                temperature = 0.7
-                max_tokens = 3000
-            elif route == "introduction":
-                sections = read_prompt_sections(INTRO_PROMPT_PATH)
-                system_prompt = sections.get("system") or ""
-                user_template = sections.get("user") or ""
-                messages = [{"role": "system", "content": system_prompt}]
-                messages.extend(coerce_history(history))
-                messages.append({"role": "user", "content": user_template.format(context=context, query=query)})
-                model = SELF_INTRO_MODEL
-                temperature = 0.7
-                max_tokens = 3000
-            elif route == "project_explaination":
-                sections = read_prompt_sections(PROJECT_EXPLAINATION_PROMPT_PATH)
-                system_prompt = sections.get("system") or ""
-                user_template = sections.get("user") or ""
-                messages = [{"role": "system", "content": system_prompt}]
-                messages.extend(coerce_history(history))
-                messages.append({"role": "user", "content": user_template.format(context=context, query=query)})
-                model = PROJECT_EXPLAINATION_MODEL
-                temperature = 0.7
-                max_tokens = 3000
-            elif route == "scenario":
-                sections = read_prompt_sections(SCENARIO_PROMPT_PATH)
-                system_prompt = sections.get("system") or ""
-                user_template = sections.get("user") or ""
-                messages = [{"role": "system", "content": system_prompt}]
-                messages.extend(coerce_history(history))
-                messages.append({"role": "user", "content": user_template.format(context=context, query=query)})
-                model = SCENARIO_MODEL
-                temperature = 0.7
-                max_tokens = 3000
-            else:
-                sections = read_prompt_sections(QA_PROMPT_PATH)
-                system_prompt = sections.get("system") or ""
-                user_template = sections.get("user") or ""
-                messages = [{"role": "system", "content": system_prompt}]
-                messages.extend(coerce_history(history))
-                messages.append({"role": "user", "content": user_template.format(context=context, query=query)})
-                model = QA_MODEL
-                temperature = 0.7
-                max_tokens = 3000
+            logger.info(
+                "SmartInput stream route=%s tenant=%s user=%s top_k=%s query=%s",
+                prepared.route,
+                tenant_id,
+                user_id,
+                prepared.top_k,
+                _preview_query(query),
+            )
+            yield _sse_event({"type": "route", "route": prepared.route})
 
             answer_parts: list[str] = []
-            for delta in _iter_openai_chat_deltas(
-                model=model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
+            for delta in iter_openai_chat_deltas(
+                model=prepared.model,
+                messages=prepared.messages,
+                temperature=prepared.temperature,
+                max_tokens=prepared.max_tokens,
             ):
                 answer_parts.append(delta)
                 yield _sse_event({"type": "delta", "delta": delta})
 
-            yield _sse_event({"type": "done", "route": route, "answer": "".join(answer_parts).strip()})
+            yield _sse_event({"type": "done", "route": prepared.route, "answer": "".join(answer_parts).strip()})
         except Exception as exc:
             yield _sse_event({"type": "error", "error": str(exc)})
 

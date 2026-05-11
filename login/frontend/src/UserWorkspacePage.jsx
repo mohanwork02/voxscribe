@@ -3,12 +3,87 @@ import { apiJson, getOrCreateTabToken, usePageMeta } from "./app-shared";
 import "./workspace.css";
 
 const SCREEN_AUDIO_PROCESSOR_BUFFER_SIZE = 2048;
+const INSIGHTS_NEW_QUESTION_VIEWPORT_OFFSET_RATIO = 0.25;
 const WORKSPACE_PANEL_RESIZE_STORAGE_KEY = "voxscribe-workspace-left-panel-width";
+const WORKSPACE_SNAPSHOT_STORAGE_KEY_PREFIX = "voxscribe-workspace-snapshot";
 const WORKSPACE_PANEL_RESIZE_BREAKPOINT = 1120;
 const WORKSPACE_LEFT_PANEL_DEFAULT_WIDTH = 520;
 const WORKSPACE_LEFT_PANEL_MIN_WIDTH = 340;
 const WORKSPACE_RIGHT_PANEL_MIN_WIDTH = 420;
 const WORKSPACE_SPLITTER_WIDTH = 18;
+
+function createDefaultActivityMessage() {
+  return {
+    text: "Ready to capture transcript input.",
+    type: "info",
+  };
+}
+
+function getWorkspaceSnapshotStorageKey() {
+  if (typeof window === "undefined") {
+    return "";
+  }
+
+  const tabToken = getOrCreateTabToken();
+  return `${WORKSPACE_SNAPSHOT_STORAGE_KEY_PREFIX}:${tabToken || "default"}`;
+}
+
+function readWorkspaceSnapshot() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  const storageKey = getWorkspaceSnapshotStorageKey();
+  if (!storageKey) {
+    return null;
+  }
+
+  try {
+    const rawSnapshot = window.sessionStorage.getItem(storageKey);
+    if (!rawSnapshot) {
+      return null;
+    }
+
+    const parsedSnapshot = JSON.parse(rawSnapshot);
+    return parsedSnapshot && typeof parsedSnapshot === "object" ? parsedSnapshot : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeWorkspaceSnapshot(snapshot) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const storageKey = getWorkspaceSnapshotStorageKey();
+  if (!storageKey) {
+    return;
+  }
+
+  try {
+    window.sessionStorage.setItem(storageKey, JSON.stringify(snapshot));
+  } catch {
+    // Ignore storage quota and serialization failures.
+  }
+}
+
+function clearWorkspaceSnapshot() {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const storageKey = getWorkspaceSnapshotStorageKey();
+  if (!storageKey) {
+    return;
+  }
+
+  try {
+    window.sessionStorage.removeItem(storageKey);
+  } catch {
+    // Ignore storage cleanup failures.
+  }
+}
 
 function clampWorkspaceLeftPanelWidth(width, containerWidth) {
   const normalizedWidth = Number(width) || WORKSPACE_LEFT_PANEL_DEFAULT_WIDTH;
@@ -139,6 +214,11 @@ function getInsightsHighlightSegments(text = "") {
   return segments;
 }
 
+function getQuestionIdFromInsightsText(text = "") {
+  const match = String(text || "").match(/^\s*(Q\d+):/);
+  return match ? match[1] : "";
+}
+
 function createTranscriptLine(transcript, speakerLabel = "") {
   return speakerLabel ? `${speakerLabel}: ${transcript}` : transcript;
 }
@@ -216,6 +296,40 @@ function getProfileInitials(email = "") {
   }
 
   return normalized.slice(0, 2).toUpperCase();
+}
+
+function sanitizeDownloadLabel(value = "", fallback = "export") {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  return normalized || fallback;
+}
+
+function buildGeneratedQuestionsDownloadText(questions = []) {
+  const questionLines = ["Questions", ""];
+  const questionAnswerLines = ["Q&A", ""];
+
+  questions.forEach((question, index) => {
+    const fallbackId = `Q${index + 1}`;
+    const questionText = String(question?.text || question?.label || question?.id || fallbackId).trim() || fallbackId;
+    const answerText = String(question?.answer || "").trim();
+    const errorText = String(question?.error || "").trim();
+    const exportAnswerText =
+      answerText && errorText
+        ? `${answerText}\n\n[Generation error] ${errorText}`
+        : answerText || errorText || "[No generated answer available]";
+
+    questionLines.push(questionText);
+    questionAnswerLines.push(questionText);
+    questionAnswerLines.push("Answer:");
+    questionAnswerLines.push(exportAnswerText);
+    questionAnswerLines.push("");
+  });
+
+  return `${questionLines.join("\n").trim()}\n\n${questionAnswerLines.join("\n").trim()}`.trim();
 }
 
 function getActivityState(isListening, transcriptLines) {
@@ -421,32 +535,73 @@ function PreviewModal({ file, isOpen, previewUrl, onClose }) {
 function UserWorkspacePage() {
   usePageMeta("Voxscribe Workspace");
 
+  const initialWorkspaceSnapshotRef = useRef(null);
+  if (initialWorkspaceSnapshotRef.current === null) {
+    initialWorkspaceSnapshotRef.current = readWorkspaceSnapshot() || {};
+  }
+
+  const initialWorkspaceSnapshot = initialWorkspaceSnapshotRef.current;
   const [sessionLoading, setSessionLoading] = useState(true);
   const [sessionUser, setSessionUser] = useState(null);
   const [accessMessage, setAccessMessage] = useState("Checking your session before opening the application...");
-  const [activityMessage, setActivityMessage] = useState({
-    text: "Ready to capture transcript input.",
-    type: "info",
+  const [activityMessage, setActivityMessage] = useState(() => {
+    const storedMessage = initialWorkspaceSnapshot.activityMessage;
+    if (storedMessage && typeof storedMessage === "object") {
+      const text = String(storedMessage.text || "").trim();
+      const type = String(storedMessage.type || "").trim();
+
+      if (text && type) {
+        return { text, type };
+      }
+    }
+
+    return createDefaultActivityMessage();
   });
   const [isListening, setIsListening] = useState(false);
-  const [uptimeSeconds, setUptimeSeconds] = useState(0);
-  const [tier, setTier] = useState("pro");
-  const [questionNumber, setQuestionNumber] = useState(1);
-  const [generatedQuestions, setGeneratedQuestions] = useState([]);
-  const [selectedGeneratedQuestionId, setSelectedGeneratedQuestionId] = useState("");
+  const [uptimeSeconds, setUptimeSeconds] = useState(() => {
+    const storedValue = Number(initialWorkspaceSnapshot.uptimeSeconds);
+    return Number.isFinite(storedValue) && storedValue >= 0 ? Math.floor(storedValue) : 0;
+  });
+  const [tier, setTier] = useState(() => String(initialWorkspaceSnapshot.tier || "pro").trim() || "pro");
+  const [questionNumber, setQuestionNumber] = useState(() => {
+    const storedValue = Number(initialWorkspaceSnapshot.questionNumber);
+    return Number.isFinite(storedValue) && storedValue >= 1 ? Math.floor(storedValue) : 1;
+  });
+  const [generatedQuestions, setGeneratedQuestions] = useState(() =>
+    Array.isArray(initialWorkspaceSnapshot.generatedQuestions) ? initialWorkspaceSnapshot.generatedQuestions : [],
+  );
+  const [selectedGeneratedQuestionId, setSelectedGeneratedQuestionId] = useState(
+    () => String(initialWorkspaceSnapshot.selectedGeneratedQuestionId || "").trim(),
+  );
   const [isQuestionDropdownOpen, setIsQuestionDropdownOpen] = useState(false);
-  const [transcriptLines, setTranscriptLines] = useState([]);
-  const [finalTranscript, setFinalTranscript] = useState("");
-  const [interimTranscript, setInterimTranscript] = useState("");
-  const [rightText, setRightText] = useState("");
-  const [messageInput, setMessageInput] = useState("");
+  const [transcriptLines, setTranscriptLines] = useState(() =>
+    Array.isArray(initialWorkspaceSnapshot.transcriptLines)
+      ? initialWorkspaceSnapshot.transcriptLines.map((line) => String(line || ""))
+      : [],
+  );
+  const [finalTranscript, setFinalTranscript] = useState(() => String(initialWorkspaceSnapshot.finalTranscript || ""));
+  const [interimTranscript, setInterimTranscript] = useState(() => String(initialWorkspaceSnapshot.interimTranscript || ""));
+  const [rightText, setRightText] = useState(() => String(initialWorkspaceSnapshot.rightText || ""));
+  const [messageInput, setMessageInput] = useState(() => String(initialWorkspaceSnapshot.messageInput || ""));
   const [composerFile, setComposerFile] = useState(null);
   const [composerError, setComposerError] = useState("");
   const [transcriptFile, setTranscriptFile] = useState(null);
-  const [smartInputKbFilePath, setSmartInputKbFilePath] = useState("");
+  const [transcriptFileName, setTranscriptFileName] = useState(
+    () => String(initialWorkspaceSnapshot.transcriptFileName || "").trim(),
+  );
+  const [smartInputKbFilePath, setSmartInputKbFilePath] = useState(
+    () => String(initialWorkspaceSnapshot.smartInputKbFilePath || "").trim(),
+  );
   const [smartInputUploadPending, setSmartInputUploadPending] = useState(false);
   const [smartInputIngestPending, setSmartInputIngestPending] = useState(false);
-  const [smartInputKbReady, setSmartInputKbReady] = useState(true);
+  const [smartInputKbReady, setSmartInputKbReady] = useState(() => {
+    const hasStoredPath = Boolean(String(initialWorkspaceSnapshot.smartInputKbFilePath || "").trim());
+    if (!hasStoredPath) {
+      return true;
+    }
+
+    return initialWorkspaceSnapshot.smartInputKbReady !== false;
+  });
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewUrl, setPreviewUrl] = useState("");
   const [logoutPending, setLogoutPending] = useState(false);
@@ -481,14 +636,19 @@ function UserWorkspacePage() {
   const screenShareEnabledRef = useRef(false);
   const activeTranscriptSourceRef = useRef(null);
   const questionDropdownRef = useRef(null);
+  const insightsShellRef = useRef(null);
   const insightsHighlightRef = useRef(null);
+  const insightsTextareaRef = useRef(null);
+  const pendingInsightsCenterQuestionIdRef = useRef("");
 
   const transcriptText = joinTranscriptSegments(transcriptLines);
   const questionLabel = `Q${questionNumber}`;
-  const questionBodyText = `${finalTranscript}${finalTranscript && interimTranscript ? " " : ""}${interimTranscript}`.trim();
+  const questionBodyTextRaw = `${finalTranscript}${finalTranscript && interimTranscript ? " " : ""}${interimTranscript}`;
+  const questionBodyText = questionBodyTextRaw.trim();
   const generatedQuestionText = questionBodyText ? `${questionLabel}: ${questionBodyText}` : "";
   const activityState = getActivityState(isListening, transcriptLines);
   const profileInitials = getProfileInitials(sessionUser?.email);
+  const selectedTranscriptFileName = String(transcriptFile?.name || transcriptFileName || "").trim();
   const selectedGeneratedQuestion =
     generatedQuestions.find((question) => question.id === selectedGeneratedQuestionId) || null;
   const insightsHighlightSegments = getInsightsHighlightSegments(rightText);
@@ -500,6 +660,46 @@ function UserWorkspacePage() {
   const setScreenShareEnabled = (enabled) => {
     screenShareEnabledRef.current = enabled;
     setIsScreenShareEnabledState(enabled);
+  };
+
+  const setInsightsScrollReserve = (reservePx = 0) => {
+    if (!insightsShellRef.current) {
+      return;
+    }
+
+    insightsShellRef.current.style.setProperty(
+      "--workspace-insights-scroll-reserve",
+      `${Math.max(0, Math.round(Number(reservePx) || 0))}px`,
+    );
+  };
+
+  const centerInsightsQuestionBlock = (questionId) => {
+    const normalizedQuestionId = String(questionId || "").trim();
+    const highlightLayer = insightsHighlightRef.current;
+    const insightsTextarea = insightsTextareaRef.current;
+
+    if (!normalizedQuestionId || !highlightLayer || !insightsTextarea) {
+      return false;
+    }
+
+    const targetNode = Array.from(highlightLayer.querySelectorAll("[data-insights-question-id]")).find(
+      (node) => node.dataset.insightsQuestionId === normalizedQuestionId,
+    );
+
+    if (!targetNode) {
+      return false;
+    }
+
+    const desiredViewportOffset = insightsTextarea.clientHeight * INSIGHTS_NEW_QUESTION_VIEWPORT_OFFSET_RATIO;
+    const maxScrollTop = Math.max(0, insightsTextarea.scrollHeight - insightsTextarea.clientHeight);
+    const targetScrollTop = Math.min(
+      maxScrollTop,
+      Math.max(0, targetNode.offsetTop + targetNode.offsetHeight / 2 - desiredViewportOffset),
+    );
+
+    insightsTextarea.scrollTop = targetScrollTop;
+    highlightLayer.scrollTop = targetScrollTop;
+    return true;
   };
 
   const isCurrentTranscriptConnection = (connection) => transcriptStreamRef.current === connection;
@@ -886,6 +1086,7 @@ function UserWorkspacePage() {
         }
 
         if (!response.ok || !data.success) {
+          clearWorkspaceSnapshot();
           setSessionUser(null);
           setAccessMessage(data.message || "User login required.");
           return;
@@ -894,6 +1095,7 @@ function UserWorkspacePage() {
         setSessionUser(data.user || null);
       } catch {
         if (active) {
+          clearWorkspaceSnapshot();
           setSessionUser(null);
           setAccessMessage("Unable to verify your session. Please login again.");
         }
@@ -948,6 +1150,19 @@ function UserWorkspacePage() {
   }, [sessionUser?.id]);
 
   useEffect(() => {
+    if (!sessionUser?.id || !smartInputKbFilePath || smartInputKbReady || smartInputUploadPending || smartInputIngestPending) {
+      return undefined;
+    }
+
+    void ingestSmartInputDocument(smartInputKbFilePath).catch((error) => {
+      const message = String(error?.message || "Unable to index Smart Input document.");
+      setActivityStatus(message, "error");
+    });
+
+    return undefined;
+  }, [sessionUser?.id, smartInputKbFilePath, smartInputKbReady, smartInputUploadPending, smartInputIngestPending]);
+
+  useEffect(() => {
     if (!isListening) {
       return undefined;
     }
@@ -998,6 +1213,85 @@ function UserWorkspacePage() {
       window.removeEventListener("resize", syncPanelWidth);
     };
   }, []);
+
+  useEffect(() => {
+    writeWorkspaceSnapshot({
+      activityMessage,
+      uptimeSeconds,
+      tier,
+      questionNumber,
+      generatedQuestions,
+      selectedGeneratedQuestionId,
+      transcriptLines,
+      finalTranscript,
+      interimTranscript,
+      rightText,
+      messageInput,
+      transcriptFileName: selectedTranscriptFileName,
+      smartInputKbFilePath,
+      smartInputKbReady: smartInputKbFilePath ? smartInputKbReady : true,
+    });
+  }, [
+    activityMessage,
+    uptimeSeconds,
+    tier,
+    questionNumber,
+    generatedQuestions,
+    selectedGeneratedQuestionId,
+    transcriptLines,
+    finalTranscript,
+    interimTranscript,
+    rightText,
+    messageInput,
+    selectedTranscriptFileName,
+    smartInputKbFilePath,
+    smartInputKbReady,
+  ]);
+
+  useEffect(() => {
+    if (!rightText) {
+      setInsightsScrollReserve(0);
+    }
+  }, [rightText]);
+
+  useEffect(() => {
+    const pendingQuestionId = pendingInsightsCenterQuestionIdRef.current;
+
+    if (!pendingQuestionId || typeof window === "undefined") {
+      return undefined;
+    }
+
+    const highlightLayer = insightsHighlightRef.current;
+    const insightsTextarea = insightsTextareaRef.current;
+
+    if (!highlightLayer || !insightsTextarea) {
+      return undefined;
+    }
+
+    const targetNode = Array.from(highlightLayer.querySelectorAll("[data-insights-question-id]")).find(
+      (node) => node.dataset.insightsQuestionId === pendingQuestionId,
+    );
+
+    if (!targetNode) {
+      return undefined;
+    }
+
+    const reservePx = Math.max(
+      0,
+      insightsTextarea.clientHeight * (1 - INSIGHTS_NEW_QUESTION_VIEWPORT_OFFSET_RATIO) - targetNode.offsetHeight / 2,
+    );
+    setInsightsScrollReserve(reservePx);
+
+    const frameId = window.requestAnimationFrame(() => {
+      if (centerInsightsQuestionBlock(pendingQuestionId)) {
+        pendingInsightsCenterQuestionIdRef.current = "";
+      }
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+    };
+  }, [rightText]);
 
   useEffect(() => {
     if (!isPanelResizing) {
@@ -1167,6 +1461,39 @@ function UserWorkspacePage() {
     }
   };
 
+  const resetWorkspaceForNewDocument = () => {
+    clearWorkspaceSnapshot();
+    pendingInsightsCenterQuestionIdRef.current = "";
+    setInsightsScrollReserve(0);
+    closeTranscriptStream({ markClosed: true, sendStopSignal: true });
+    teardownScreenAudioPipeline();
+    releaseScreenShare(true);
+    setIsListening(false);
+    setUptimeSeconds(0);
+    setQuestionNumber(1);
+    setGeneratedQuestions([]);
+    setSelectedGeneratedQuestionId("");
+    setIsQuestionDropdownOpen(false);
+    setTranscriptLines([]);
+    setFinalTranscript("");
+    setInterimTranscript("");
+    setRightText("");
+    setMessageInput("");
+    setComposerFile(null);
+    setComposerError("");
+    setTranscriptFile(null);
+    setTranscriptFileName("");
+    setSmartInputKbFilePath("");
+    setSmartInputKbReady(true);
+    setPreviewOpen(false);
+    setPreviewUrl("");
+    setActivityMessage(createDefaultActivityMessage());
+
+    if (composerFileInputRef.current) {
+      composerFileInputRef.current.value = "";
+    }
+  };
+
   const handleStop = () => {
     closeTranscriptStream({ markClosed: true, sendStopSignal: true });
     teardownScreenAudioPipeline();
@@ -1198,19 +1525,25 @@ function UserWorkspacePage() {
   };
 
   const handleDownload = () => {
-    if (!questionBodyText.trim()) {
-      setActivityStatus("There is no transcript to download yet.", "error");
+    if (!generatedQuestions.length) {
+      setActivityStatus("There are no generated questions and answers to download yet.", "error");
       return;
     }
 
-    const blob = new Blob([questionBodyText], { type: "text/plain" });
+    const candidateLabel = sanitizeDownloadLabel(
+      String(sessionUser?.email || "").split("@")[0] || sessionUser?.email,
+      "candidate",
+    );
+    const downloadText = buildGeneratedQuestionsDownloadText(generatedQuestions);
+    const exportDate = new Date().toISOString().slice(0, 10);
+    const blob = new Blob([downloadText], { type: "text/plain" });
     const downloadUrl = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = downloadUrl;
-    link.download = "transcript.txt";
+    link.download = `${candidateLabel}-questions-answers-${exportDate}.txt`;
     link.click();
     URL.revokeObjectURL(downloadUrl);
-    setActivityStatus("Transcript downloaded.", "success");
+    setActivityStatus("Questions and generated answers downloaded.", "success");
   };
 
   const handleGenerate = async () => {
@@ -1226,7 +1559,7 @@ function UserWorkspacePage() {
       return;
     }
 
-    if (smartInputIngestPending || (transcriptFile && !smartInputKbReady)) {
+    if (smartInputIngestPending || (smartInputKbFilePath && !smartInputKbReady)) {
       setActivityStatus("Please wait for the Smart Input document indexing to finish.", "info");
       return;
     }
@@ -1235,8 +1568,11 @@ function UserWorkspacePage() {
       id: questionLabel,
       label: `${questionLabel} : ${transcriptText}`,
       text: generatedQuestionText,
+      answer: "",
+      error: "",
     };
 
+    pendingInsightsCenterQuestionIdRef.current = generatedQuestion.id;
     setRightText((current) => {
       const existingText = String(current || "").trim();
       return existingText ? `${existingText}\n\n${generatedQuestionText}` : generatedQuestionText;
@@ -1268,12 +1604,19 @@ function UserWorkspacePage() {
 
       if (!streamResponse.ok) {
         const errorText = (await streamResponse.text()) || "Smart input backend returned an error.";
+        setGeneratedQuestions((current) =>
+          current.map((question) => (question.id === generatedQuestion.id ? { ...question, error: errorText } : question)),
+        );
         setActivityStatus(errorText, "error");
         return;
       }
 
       if (!streamResponse.body) {
-        setActivityStatus("Smart input streaming is not supported in this browser.", "error");
+        const errorText = "Smart input streaming is not supported in this browser.";
+        setGeneratedQuestions((current) =>
+          current.map((question) => (question.id === generatedQuestion.id ? { ...question, error: errorText } : question)),
+        );
+        setActivityStatus(errorText, "error");
         return;
       }
 
@@ -1326,6 +1669,13 @@ function UserWorkspacePage() {
               const delta = String(payload.delta || "");
               if (delta) {
                 setRightText((current) => `${String(current || "")}${delta}`);
+                setGeneratedQuestions((current) =>
+                  current.map((question) =>
+                    question.id === generatedQuestion.id
+                      ? { ...question, answer: `${String(question.answer || "")}${delta}` }
+                      : question,
+                  ),
+                );
               }
               continue;
             }
@@ -1345,6 +1695,9 @@ function UserWorkspacePage() {
       setActivityStatus("Answer received.", "success");
     } catch (error) {
       const message = String(error?.message || "Unable to reach smart input backend.");
+      setGeneratedQuestions((current) =>
+        current.map((question) => (question.id === generatedQuestion.id ? { ...question, error: message } : question)),
+      );
       setActivityStatus(message, "error");
     }
   };
@@ -1600,6 +1953,7 @@ function UserWorkspacePage() {
 
     if (!file) {
       setTranscriptFile(null);
+      setTranscriptFileName("");
       setSmartInputKbFilePath("");
       setSmartInputKbReady(true);
       setActivityStatus("No transcript document selected.", "info");
@@ -1609,22 +1963,30 @@ function UserWorkspacePage() {
     if (!isAllowedTranscriptFile(file)) {
       event.target.value = "";
       setTranscriptFile(null);
+      setTranscriptFileName("");
       setSmartInputKbFilePath("");
       setSmartInputKbReady(true);
       setActivityStatus("Only DOC, DOCX, and PDF files are allowed for transcript upload.", "error");
       return;
     }
 
+    resetWorkspaceForNewDocument();
     setTranscriptFile(file);
+    setTranscriptFileName(String(file.name || "").trim());
     setSmartInputKbReady(false);
+    let uploadedPath = "";
 
     try {
-      const uploadedPath = await uploadSmartInputDocument(file);
+      uploadedPath = await uploadSmartInputDocument(file);
       setSmartInputKbFilePath(uploadedPath);
       await ingestSmartInputDocument(uploadedPath);
     } catch (error) {
       setSmartInputKbFilePath("");
       setSmartInputKbReady(false);
+      if (!uploadedPath) {
+        setTranscriptFile(null);
+        setTranscriptFileName("");
+      }
       const message = String(error?.message || "Unable to upload Smart Input document.");
       setActivityStatus(message, "error");
     }
@@ -1692,6 +2054,7 @@ function UserWorkspacePage() {
         method: "POST",
       });
     } finally {
+      clearWorkspaceSnapshot();
       window.location.assign("/");
     }
   };
@@ -1904,7 +2267,9 @@ function UserWorkspacePage() {
               </div>
 
               <div className="workspace-upload-info">
-                {transcriptFile ? `Selected document: ${transcriptFile.name}` : "No transcript document selected"}
+                {selectedTranscriptFileName
+                  ? `Selected document: ${selectedTranscriptFileName}`
+                  : "No transcript document selected"}
               </div>
 
               <div className="workspace-question-dropdown-row">
@@ -1968,22 +2333,16 @@ function UserWorkspacePage() {
                 </div>
               </div>
 
-              <div ref={transcriptBoxRef} className="workspace-transcript-box">
-                {transcriptLines.length || interimTranscript || finalTranscript ? (
-                  <div className="workspace-transcript-content">
-                    {finalTranscript && <span>{finalTranscript}</span>}
-                    {interimTranscript && (
-                      <span className="workspace-transcript-line-live">
-                        {finalTranscript ? ` ${interimTranscript}` : interimTranscript}
-                      </span>
-                    )}
-                  </div>
-                ) : (
-                  <div className="workspace-empty-state">
-                    ......
-                  </div>
-                )}
-              </div>
+              <textarea
+                ref={transcriptBoxRef}
+                className="workspace-transcript-box"
+                value={questionBodyTextRaw}
+                onChange={(event) => {
+                  setFinalTranscript(event.target.value);
+                  setInterimTranscript("");
+                }}
+                placeholder="......"
+              />
 
               <div className="workspace-actions">
                 <button type="button" className="workspace-secondary-btn" onClick={handleCopy}>
@@ -1993,7 +2352,7 @@ function UserWorkspacePage() {
                   type="button"
                   className="workspace-dark-btn"
                   onClick={handleGenerate}
-                  disabled={smartInputUploadPending || smartInputIngestPending || (transcriptFile && !smartInputKbReady)}
+                  disabled={smartInputUploadPending || smartInputIngestPending || (smartInputKbFilePath && !smartInputKbReady)}
                 >
                   Generate
                 </button>
@@ -2110,12 +2469,15 @@ function UserWorkspacePage() {
               <div className="workspace-timer-box">{formatDuration(uptimeSeconds)}</div>
             </div>
 
-            <div className="workspace-insights-shell">
+            <div ref={insightsShellRef} className="workspace-insights-shell">
               <div ref={insightsHighlightRef} className="workspace-insights-highlight" aria-hidden="true">
                 {insightsHighlightSegments.length ? (
                   insightsHighlightSegments.map((segment, index) => (
                     <span
                       key={`${segment.type}-${index}`}
+                      data-insights-question-id={
+                        segment.type === "question" ? getQuestionIdFromInsightsText(segment.text) || undefined : undefined
+                      }
                       className={
                         segment.type === "question" ? "workspace-insights-highlight-question" : undefined
                       }
@@ -2129,6 +2491,7 @@ function UserWorkspacePage() {
               </div>
 
               <textarea
+                ref={insightsTextareaRef}
                 value={rightText}
                 onChange={(event) => setRightText(event.target.value)}
                 onScroll={syncInsightsScroll}

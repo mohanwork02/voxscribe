@@ -33,6 +33,7 @@ services:
       TOP_K: ${TOP_K:-6}
 
       # Optional knobs
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       ROUTING_MODE: ${ROUTING_MODE:-llm} # rules|llm
       RETRIEVAL_MODE: ${RETRIEVAL_MODE:-lexical} # lexical|embedding
       STREAM_OUTPUT: ${STREAM_OUTPUT:-1}
