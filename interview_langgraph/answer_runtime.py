@@ -26,7 +26,7 @@ from interview_langgraph.route.router import route_node
 
 VALID_ROUTES = {"introduction", "project_explaination", "code", "scenario", "qa"}
 DEFAULT_TEMPERATURE = 0.7
-DEFAULT_MAX_TOKENS = 3000
+DEFAULT_MAX_TOKENS = 5000
 _INTRO_SEED_QUERIES: tuple[str, ...] = (
     "professional summary",
     "summary",

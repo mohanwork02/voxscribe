@@ -19,6 +19,54 @@ function createDefaultActivityMessage() {
   };
 }
 
+const SEVEN_SEGMENT_ACTIVE_SEGMENTS = {
+  "0": ["a", "b", "c", "d", "e", "f"],
+  "1": ["b", "c"],
+  "2": ["a", "b", "g", "e", "d"],
+  "3": ["a", "b", "g", "c", "d"],
+  "4": ["f", "g", "b", "c"],
+  "5": ["a", "f", "g", "c", "d"],
+  "6": ["a", "f", "g", "e", "c", "d"],
+  "7": ["a", "b", "c"],
+  "8": ["a", "b", "c", "d", "e", "f", "g"],
+  "9": ["a", "b", "c", "d", "f", "g"],
+};
+
+function SevenSegmentTime({ value }) {
+  const text = String(value ?? "");
+  const segmentKeys = ["a", "b", "c", "d", "e", "f", "g"];
+
+  return (
+    <span className="workspace-seven-seg" aria-label={text}>
+      {Array.from(text).map((char, index) => {
+        if (char === ":") {
+          return (
+            <span key={`colon-${index}`} className="workspace-seven-seg-colon" aria-hidden="true">
+              <span className="workspace-seven-seg-dot" />
+              <span className="workspace-seven-seg-dot" />
+            </span>
+          );
+        }
+
+        const activeSegments = SEVEN_SEGMENT_ACTIVE_SEGMENTS[char] || [];
+
+        return (
+          <span key={`digit-${index}-${char}`} className="workspace-seven-seg-digit" aria-hidden="true">
+            {segmentKeys.map((segment) => (
+              <span
+                key={segment}
+                className={`workspace-seven-seg-segment workspace-seven-seg-${segment}${
+                  activeSegments.includes(segment) ? " on" : ""
+                }`}
+              />
+            ))}
+          </span>
+        );
+      })}
+    </span>
+  );
+}
+
 function getWorkspaceSnapshotStorageKey() {
   if (typeof window === "undefined") {
     return "";
@@ -191,27 +239,77 @@ function getScreenShareErrorMessage(error) {
   return message || "Unable to start screen share.";
 }
 
-function getInsightsHighlightSegments(text = "") {
-  const source = String(text || "");
-  const questionBlockPattern = /Q\d+:[\s\S]*?(?=\n{2,}|$)/g;
-  const segments = [];
-  let cursor = 0;
-  let match;
+function isInsightsBulletLine(text = "") {
+  return /^([-*•]\s+|\d+[.)]\s+)/.test(String(text || "").trim());
+}
 
-  while ((match = questionBlockPattern.exec(source)) !== null) {
-    if (match.index > cursor) {
-      segments.push({ type: "plain", text: source.slice(cursor, match.index) });
-    }
+function isInsightsQuestionLine(text = "") {
+  return /^\s*Q\d+:/i.test(String(text || ""));
+}
 
-    segments.push({ type: "question", text: match[0] });
-    cursor = match.index + match[0].length;
+function isInsightsMarkdownHeadingLine(text = "") {
+  return /^\s*#{1,2}\s+\S/.test(String(text || ""));
+}
+
+function isInsightsMarkdownSubheadingLine(text = "") {
+  return /^\s*###\s+\S/.test(String(text || ""));
+}
+
+function isInsightsStandaloneHeadingLine(text = "") {
+  const trimmed = String(text || "").trim();
+
+  if (!trimmed || isInsightsQuestionLine(trimmed) || isInsightsBulletLine(trimmed)) {
+    return false;
   }
 
-  if (cursor < source.length) {
-    segments.push({ type: "plain", text: source.slice(cursor) });
+  if (/[.!?]$/.test(trimmed) || trimmed.length > 80) {
+    return false;
   }
 
-  return segments;
+  const words = trimmed.split(/\s+/).filter(Boolean);
+
+  if (!words.length || words.length > 8) {
+    return false;
+  }
+
+  const headingLikeWordCount = words.filter((word) => /^[A-Z0-9][A-Za-z0-9/&()+-]*$/.test(word)).length;
+  return headingLikeWordCount >= Math.max(1, Math.ceil(words.length * 0.6));
+}
+
+function isInsightsStandaloneSubheadingLine(text = "") {
+  const trimmed = String(text || "").trim();
+
+  if (!trimmed || isInsightsQuestionLine(trimmed) || isInsightsBulletLine(trimmed) || !trimmed.endsWith(":")) {
+    return false;
+  }
+
+  return isInsightsStandaloneHeadingLine(trimmed.slice(0, -1));
+}
+
+function getInsightsHighlightLines(text = "") {
+  return String(text || "")
+    .split("\n")
+    .map((line) => {
+      const trimmed = line.trim();
+
+      if (isInsightsQuestionLine(trimmed)) {
+        return {
+          type: "question",
+          text: line,
+          questionId: getQuestionIdFromInsightsText(trimmed) || undefined,
+        };
+      }
+
+      if (isInsightsMarkdownSubheadingLine(line) || isInsightsStandaloneSubheadingLine(line)) {
+        return { type: "subheading", text: line };
+      }
+
+      if (isInsightsMarkdownHeadingLine(line) || isInsightsStandaloneHeadingLine(line)) {
+        return { type: "heading", text: line };
+      }
+
+      return { type: "plain", text: line };
+    });
 }
 
 function getQuestionIdFromInsightsText(text = "") {
@@ -651,7 +749,7 @@ function UserWorkspacePage() {
   const selectedTranscriptFileName = String(transcriptFile?.name || transcriptFileName || "").trim();
   const selectedGeneratedQuestion =
     generatedQuestions.find((question) => question.id === selectedGeneratedQuestionId) || null;
-  const insightsHighlightSegments = getInsightsHighlightSegments(rightText);
+  const insightsHighlightLines = getInsightsHighlightLines(rightText);
 
   const setActivityStatus = (text, type = "info") => {
     setActivityMessage({ text, type });
@@ -1702,6 +1800,20 @@ function UserWorkspacePage() {
     }
   };
 
+  const handleSmartInputKeyDown = (event) => {
+    if (
+      event.key === "Enter" &&
+      !event.shiftKey &&
+      !event.altKey &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.nativeEvent.isComposing
+    ) {
+      event.preventDefault();
+      handleGenerate();
+    }
+  };
+
   const handleScreenShare = async () => {
     if (!navigator.mediaDevices?.getDisplayMedia) {
       setActivityStatus("Screen sharing is not supported in this browser.", "error");
@@ -2097,11 +2209,13 @@ function UserWorkspacePage() {
           </div>
 
           <div className="workspace-profile-card">
-            <div className="workspace-profile-avatar">{profileInitials}</div>
+            <div className="workspace-profile-left">
+              <div className="workspace-profile-avatar">{profileInitials}</div>
 
-            <div className="workspace-profile-content">
-              <div className="workspace-profile-title">Login Profile</div>
-              <div className="workspace-profile-subtitle">{sessionUser.email}</div>
+              <div className="workspace-profile-content">
+                <div className="workspace-profile-title">Login Profile</div>
+                <div className="workspace-profile-subtitle">{sessionUser.email}</div>
+              </div>
             </div>
 
             <button
@@ -2341,6 +2455,7 @@ function UserWorkspacePage() {
                   setFinalTranscript(event.target.value);
                   setInterimTranscript("");
                 }}
+                onKeyDown={handleSmartInputKeyDown}
                 placeholder="......"
               />
 
@@ -2352,8 +2467,37 @@ function UserWorkspacePage() {
                   type="button"
                   className="workspace-dark-btn"
                   onClick={handleGenerate}
+                  onMouseEnter={(event) => {
+                    if (event.currentTarget.disabled) {
+                      return;
+                    }
+
+                    event.currentTarget.style.transform = "scale(1.05)";
+                    event.currentTarget.style.background = "linear-gradient(to right, #77daff, #7c6bff)";
+                  }}
+                  onMouseLeave={(event) => {
+                    event.currentTarget.style.transform = "";
+                    event.currentTarget.style.background = "linear-gradient(to right, #5cc8ff, #6b5cff)";
+                  }}
                   disabled={smartInputUploadPending || smartInputIngestPending || (smartInputKbFilePath && !smartInputKbReady)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    padding: "12px 24px",
+                    border: "none",
+                    borderRadius: 12,
+                    background: "linear-gradient(to right, #5cc8ff, #6b5cff)",
+                    color: "#ffffff",
+                    fontSize: 18,
+                    fontWeight: 600,
+                    boxShadow: "0 4px 10px rgba(0,0,0,0.15)",
+                    transition: "transform 0.3s ease, background 0.3s ease",
+                  }}
                 >
+                  <span aria-hidden="true" style={{ fontSize: 18, lineHeight: 1 }}>
+                    ✦
+                  </span>
                   Generate
                 </button>
               </div>
@@ -2466,23 +2610,31 @@ function UserWorkspacePage() {
             <div className="workspace-section-header">
               <h3>Insights</h3>
 
-              <div className="workspace-timer-box">{formatDuration(uptimeSeconds)}</div>
+              <div className="workspace-timer-box">
+                <SevenSegmentTime value={formatDuration(uptimeSeconds)} />
+              </div>
             </div>
 
             <div ref={insightsShellRef} className="workspace-insights-shell">
               <div ref={insightsHighlightRef} className="workspace-insights-highlight" aria-hidden="true">
-                {insightsHighlightSegments.length ? (
-                  insightsHighlightSegments.map((segment, index) => (
+                {insightsHighlightLines.length ? (
+                  insightsHighlightLines.map((line, index) => (
                     <span
-                      key={`${segment.type}-${index}`}
-                      data-insights-question-id={
-                        segment.type === "question" ? getQuestionIdFromInsightsText(segment.text) || undefined : undefined
-                      }
-                      className={
-                        segment.type === "question" ? "workspace-insights-highlight-question" : undefined
-                      }
+                      key={`${line.type}-${index}`}
+                      data-insights-question-id={line.questionId}
+                      className={`workspace-insights-highlight-line${
+                        line.type === "question"
+                          ? " workspace-insights-highlight-question"
+                          : line.type === "heading"
+                            ? " workspace-insights-highlight-heading"
+                            : line.type === "subheading"
+                              ? " workspace-insights-highlight-subheading"
+                              : line.text
+                                ? ""
+                                : " workspace-insights-highlight-line-empty"
+                      }`}
                     >
-                      {segment.text}
+                      {line.text || " "}
                     </span>
                   ))
                 ) : (

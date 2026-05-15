@@ -1,3 +1,5 @@
+version: "3.9"
+
 services:
   db:
     image: postgres:16-alpine
@@ -39,17 +41,14 @@ services:
       STREAM_OUTPUT: ${STREAM_OUTPUT:-1}
       WRITE_VERIFICATION: ${WRITE_VERIFICATION:-0}
 
-      # Google Speech credentials (mount the JSON file via volume below)
+      # Google Speech credentials
       GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/google_service_account.json
     volumes:
-      # Persist tenant KB indexes / vectors in the repo folder (so you can inspect them locally)
       - ./interview_langgraph/artifacts:/app/interview_langgraph/artifacts
-      # Read uploaded documents saved by the web container (Smart Input ingest uses these paths)
       - web_uploads:/app/login/uploads:ro
-      # Service account JSON (provide host path via GOOGLE_SA_JSON_PATH in root .env)
       - ${GOOGLE_SA_JSON_PATH:-./secrets/google_service_account.json}:/run/secrets/google_service_account.json:ro
     ports:
-      - "8000:8000"
+      - "${API_HOST_PORT:-8000}:8000"
 
   web:
     build:
@@ -79,12 +78,10 @@ services:
       SMTP_PASS: ${SMTP_PASS:-}
       SMTP_FROM: ${SMTP_FROM:-}
     volumes:
-      # Persist user uploads across restarts
       - web_uploads:/app/login/uploads
     ports:
-      - "3000:3000"
+      - "${WEB_HOST_PORT:-3000}:3000"
 
 volumes:
   db_data:
   web_uploads:
-  # api_artifacts removed (now bind-mounted to repo)

@@ -59,8 +59,8 @@ def answer_code(state: WorkflowState) -> WorkflowState:
                 client=_client,
                 model=CODE_MODEL,
                 messages=messages,
-                temperature=0.7,
-                max_tokens=3000,
+                temperature=0.8,
+                max_tokens=5000,
                 
             )
             return {"answer": answer, "streamed": streamed}
@@ -68,8 +68,8 @@ def answer_code(state: WorkflowState) -> WorkflowState:
         response = _client.chat.completions.create(
             model=CODE_MODEL,
             messages=messages,
-            temperature=0.7,
-            max_tokens=3000,
+            temperature=0.8,
+            max_tokens=5000,
         )
         return {"answer": (response.choices[0].message.content or "").strip(), "streamed": False}
     except Exception:
