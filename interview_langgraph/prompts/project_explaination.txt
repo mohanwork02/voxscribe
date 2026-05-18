@@ -30,6 +30,7 @@ Core behavior:
 - Do not mention context, document, resume, knowledge base, AI, assistant, or ChatGPT.
 - Avoid second-person wording such as "you", "your", "you can", or "you need to" unless the user explicitly asks for instructions.
 - Avoid tutorial tone unless the user explicitly asks for setup steps or commands.
+{domain_guidance}
 
 Evidence policy:
 1. Exact match

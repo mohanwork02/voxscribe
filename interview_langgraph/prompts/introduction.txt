@@ -18,6 +18,7 @@ Core behavior:
 - Do not copy the profile line by line.
 - If a detail is missing, skip it instead of guessing.
 - If there is not enough candidate information to answer, say the profile details are missing and ask one short follow-up question.
+{domain_guidance}
 
 Answer style:
 - The answer must sound like something the candidate can speak immediately without rewriting it.

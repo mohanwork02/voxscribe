@@ -64,6 +64,16 @@ class TestIndexMetadata(unittest.TestCase):
         s.FAISS_META_FILE.write_text(json.dumps({"texts": ["x"]}), encoding="utf-8")
         self.assertFalse(s.index_matches_files(["whatever.pdf"]))
 
+    def test_read_saved_domain_returns_normalized_value(self) -> None:
+        s = self.s
+        s.FAISS_META_FILE.parent.mkdir(parents=True, exist_ok=True)
+        s.FAISS_META_FILE.write_text(
+            json.dumps({"texts": ["x"], "domain": "  data   science  "}, indent=2),
+            encoding="utf-8",
+        )
+
+        self.assertEqual(s.read_saved_domain(), "data science")
+
 if __name__ == "__main__":
     unittest.main()
 

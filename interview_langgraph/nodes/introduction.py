@@ -60,7 +60,6 @@ def generate_introduction(
             "Expected sections ===SYSTEM=== and ===USER===."
         ), False
     context = "\n\n".join(context_chunks)
-
     issues = get_openai_setup_issues()
     if issues:
         return "Cannot call LLM API:\n- " + "\n- ".join(issues), False

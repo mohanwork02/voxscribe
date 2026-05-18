@@ -23,6 +23,10 @@ def _ensure_output_dir() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def normalize_domain_value(value: object) -> str:
+    return " ".join(str(value or "").split())
+
+
 def configure_output_dir(output_dir: str | Path) -> None:
     """
     Re-point all artifact file paths (FAISS index, metadata, vectors, history, etc.) to a new directory.
@@ -189,13 +193,22 @@ def build_faiss_index(all_embeddings: list[dict[str, Any]]):
         return vectors, texts
 
 
-def save_faiss(index, texts: list[str], *, sources: list[dict[str, object]] | None = None) -> None:
+def save_faiss(
+    index,
+    texts: list[str],
+    *,
+    sources: list[dict[str, object]] | None = None,
+    domain: str = "",
+) -> None:
     _ensure_output_dir()
 
     meta: dict[str, object] = {"texts": texts}
     if sources:
         meta["sources"] = sources
         meta["sources_sig"] = _sources_signature(sources)
+    normalized_domain = normalize_domain_value(domain)
+    if normalized_domain:
+        meta["domain"] = normalized_domain
     FAISS_META_FILE.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
     try:
@@ -212,6 +225,19 @@ def save_faiss(index, texts: list[str], *, sources: list[dict[str, object]] | No
     np.save(VECTORS_FILE, np.asarray(index, dtype=np.float32))
     if FAISS_INDEX_FILE.exists():
         FAISS_INDEX_FILE.unlink()
+
+
+def read_saved_domain() -> str:
+    _ensure_output_dir()
+    if not FAISS_META_FILE.is_file():
+        return ""
+
+    try:
+        meta = json.loads(FAISS_META_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+
+    return normalize_domain_value(meta.get("domain"))
 
 
 def load_faiss():

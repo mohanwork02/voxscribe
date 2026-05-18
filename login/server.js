@@ -81,7 +81,16 @@ function sanitizeUploadFilename(value) {
 
 function isAllowedSmartInputUpload(filename) {
   const ext = path.extname(String(filename || "").trim()).toLowerCase();
-  return ext === ".pdf" || ext === ".docx" || ext === ".txt" || ext === ".md";
+  return (
+    ext === ".pdf" ||
+    ext === ".docx" ||
+    ext === ".txt" ||
+    ext === ".md" ||
+    ext === ".png" ||
+    ext === ".jpg" ||
+    ext === ".jpeg" ||
+    ext === ".webp"
+  );
 }
 
 function tenantUploadBaseDir(tenantId, userId) {
@@ -188,7 +197,7 @@ app.post(
       if (!isAllowedSmartInputUpload(filename)) {
         return res.status(400).json({
           success: false,
-          message: "Only PDF, DOCX, TXT, and MD files are supported for Smart Input.",
+          message: "Only PDF, DOCX, TXT, MD, PNG, JPG, JPEG, and WEBP files are supported for Smart Input.",
         });
       }
 
@@ -1605,6 +1614,9 @@ app.post("/api/smart-input/query", requireUser, async (req, res) => {
     if (Array.isArray(body.files)) {
       body.files = filterTenantUploadPaths(body.files, req.user?.tenantId, req.user?.userId);
     }
+    if (Array.isArray(body.imageFiles)) {
+      body.imageFiles = filterTenantUploadPaths(body.imageFiles, req.user?.tenantId, req.user?.userId);
+    }
     const upstreamResponse = await fetch(`${TRANSCRIPT_BACKEND_BASE_URL}/api/smart-input/query`, {
       method: "POST",
       headers: {
@@ -1638,6 +1650,9 @@ app.post("/api/smart-input/ingest", requireUser, async (req, res) => {
     const body = { ...(req.body || {}) };
     if (Array.isArray(body.files)) {
       body.files = filterTenantUploadPaths(body.files, req.user?.tenantId, req.user?.userId);
+    }
+    if (Array.isArray(body.imageFiles)) {
+      body.imageFiles = filterTenantUploadPaths(body.imageFiles, req.user?.tenantId, req.user?.userId);
     }
     const upstreamResponse = await fetch(`${TRANSCRIPT_BACKEND_BASE_URL}/api/smart-input/ingest`, {
       method: "POST",
@@ -1705,6 +1720,9 @@ app.post("/api/smart-input/stream", requireUser, async (req, res) => {
     const body = { ...(req.body || {}) };
     if (Array.isArray(body.files)) {
       body.files = filterTenantUploadPaths(body.files, req.user?.tenantId, req.user?.userId);
+    }
+    if (Array.isArray(body.imageFiles)) {
+      body.imageFiles = filterTenantUploadPaths(body.imageFiles, req.user?.tenantId, req.user?.userId);
     }
     const upstreamResponse = await fetch(`${TRANSCRIPT_BACKEND_BASE_URL}/api/smart-input/stream`, {
       method: "POST",

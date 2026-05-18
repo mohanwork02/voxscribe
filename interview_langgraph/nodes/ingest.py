@@ -43,6 +43,7 @@ def create_embeddings(chunks: list[str], cache: dict[str, list[float]]) -> list[
     return embeddings
 def ingest_documents(state: WorkflowState) -> WorkflowState:
     files = state.get("files") or []
+    domain = " ".join(str(state.get("domain") or "").split())
     if not files:
         raise ValueError("No input files provided. Pass one or more .pdf/.docx paths.")
 
@@ -89,7 +90,7 @@ def ingest_documents(state: WorkflowState) -> WorkflowState:
             output.close()
 
     index, texts = build_faiss_index(all_embeddings)
-    save_faiss(index, texts, sources=sources)
+    save_faiss(index, texts, sources=sources, domain=domain)
 
     result: WorkflowState = {
         "chunk_count": total_chunks,

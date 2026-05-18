@@ -79,7 +79,11 @@ def _preview_query(value: str, *, limit: int = 160) -> str:
     text = " ".join(str(value or "").split())
     if len(text) <= limit:
         return text
-    return text[: max(0, limit - 1)] + "…"
+    return text[: max(0, limit - 3)] + "..."
+
+
+def _normalize_domain(value: object) -> str:
+    return " ".join(str(value or "").split())
 
 
 def _get_tenant_context_from_headers(headers) -> tuple[str, str]:
@@ -169,11 +173,20 @@ def _get_llm_graph():
         return llm_graph
 
 
-def _run_llm_query(*, query: str, files: list[str], top_k: int | None = None) -> dict:
+def _run_llm_query(
+    *,
+    query: str,
+    files: list[str],
+    top_k: int | None = None,
+    domain: str = "",
+) -> dict:
     graph = _get_llm_graph()
     state: dict = {"query": query, "files": files}
     if top_k is not None:
         state["top_k"] = top_k
+    normalized_domain = _normalize_domain(domain)
+    if normalized_domain:
+        state["domain"] = normalized_domain
 
     final_state: dict | None = None
     for snapshot in graph.stream(state, stream_mode="values"):
@@ -215,13 +228,33 @@ async def ingest_smart_input_kb(request: Request):
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail="Invalid top_k value.")
 
+    domain = _normalize_domain(payload.get("domain"))
+
+    logger.info(
+        "SmartInput ingest start tenant=%s user=%s domain=%s files=%s",
+        tenant_id,
+        user_id,
+        domain or "-",
+        len(files),
+    )
+
     with _tenant_io_lock:
         _configure_tenant_artifacts_dir(tenant_id=tenant_id, user_id=user_id)
-        result = _run_llm_query(query="", files=files, top_k=top_k)
+        result = _run_llm_query(query="", files=files, top_k=top_k, domain=domain)
+
+    logger.info(
+        "SmartInput ingest done tenant=%s user=%s domain=%s chunks=%s vectors=%s",
+        tenant_id,
+        user_id,
+        domain or "-",
+        result.get("chunk_count") or 0,
+        result.get("vector_count") or 0,
+    )
 
     return {
         "success": True,
         "files": files,
+        "domain": domain,
         "chunkCount": result.get("chunk_count") or 0,
         "vectorCount": result.get("vector_count") or 0,
         "faissIndexFile": result.get("faiss_index_file") or "",
@@ -259,6 +292,11 @@ async def stream_smart_input_query(request: Request):
     if isinstance(raw_files, list):
         files = [str(item) for item in raw_files if str(item or "").strip()]
 
+    raw_image_files = payload.get("imageFiles", payload.get("image_files"))
+    image_files: list[str] = []
+    if isinstance(raw_image_files, list):
+        image_files = [str(item) for item in raw_image_files if str(item or "").strip()][:8]
+
     def event_generator():
         yield ": connected\n\n"
         try:
@@ -274,21 +312,23 @@ async def stream_smart_input_query(request: Request):
                 _configure_tenant_artifacts_dir(tenant_id=tenant_id, user_id=user_id)
                 if files:
                     _run_llm_query(query="", files=files, top_k=top_k)
-                prepared = prepare_answer_request(query=query, history=history, top_k=top_k)
+                prepared = prepare_answer_request(query=query, history=history, top_k=top_k, image_files=image_files)
 
             logger.info(
-                "SmartInput retrieval route=%s tenant=%s user=%s chunks=%s",
+                "SmartInput retrieval route=%s tenant=%s user=%s chunks=%s images=%s",
                 prepared.route,
                 tenant_id,
                 user_id,
                 len(prepared.context_chunks),
+                len(image_files),
             )
             logger.info(
-                "SmartInput stream route=%s tenant=%s user=%s top_k=%s query=%s",
+                "SmartInput stream route=%s tenant=%s user=%s top_k=%s images=%s query=%s",
                 prepared.route,
                 tenant_id,
                 user_id,
                 prepared.top_k,
+                len(image_files),
                 _preview_query(query),
             )
             yield _sse_event({"type": "route", "route": prepared.route})

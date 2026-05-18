@@ -11,6 +11,8 @@ const WORKSPACE_LEFT_PANEL_DEFAULT_WIDTH = 520;
 const WORKSPACE_LEFT_PANEL_MIN_WIDTH = 340;
 const WORKSPACE_RIGHT_PANEL_MIN_WIDTH = 420;
 const WORKSPACE_SPLITTER_WIDTH = 18;
+const COMPOSER_IMAGE_LIMIT = 8;
+const COMPOSER_ALLOWED_IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp"]);
 
 function createDefaultActivityMessage() {
   return {
@@ -239,6 +241,10 @@ function getScreenShareErrorMessage(error) {
   return message || "Unable to start screen share.";
 }
 
+function normalizeDomainValue(value = "") {
+  return String(value || "").trim().replace(/\s+/g, " ");
+}
+
 function isInsightsBulletLine(text = "") {
   return /^([-*•]\s+|\d+[.)]\s+)/.test(String(text || "").trim());
 }
@@ -312,6 +318,20 @@ function getInsightsHighlightLines(text = "") {
     });
 }
 
+function isAllowedComposerImage(file) {
+  if (!file) {
+    return false;
+  }
+
+  const extension = getFileExtension(file.name);
+  if (COMPOSER_ALLOWED_IMAGE_EXTENSIONS.has(extension)) {
+    return true;
+  }
+
+  const mimeType = String(file.type || "").toLowerCase();
+  return mimeType === "image/png" || mimeType === "image/jpeg" || mimeType === "image/webp";
+}
+
 function getQuestionIdFromInsightsText(text = "") {
   const match = String(text || "").match(/^\s*(Q\d+):/);
   return match ? match[1] : "";
@@ -379,6 +399,87 @@ function getComposerFileLabel(file) {
   return `pasted-image.${normalizedSubtype}`;
 }
 
+function clampComposerImageFiles(files = []) {
+  return Array.isArray(files) ? files.slice(0, COMPOSER_IMAGE_LIMIT) : [];
+}
+
+function summarizeQuestionText(text = "", fallback = "Untitled request") {
+  const normalized = String(text || "").replace(/\s+/g, " ").trim();
+
+  if (!normalized) {
+    return fallback;
+  }
+
+  return normalized.length > 96 ? `${normalized.slice(0, 93).trimEnd()}...` : normalized;
+}
+
+function buildQuestionLabel(questionId, summary) {
+  const normalizedSummary = summarizeQuestionText(summary, "Untitled request");
+  return `${String(questionId || "").trim()} : ${normalizedSummary}`;
+}
+
+function buildQuestionEntryText(questionId, promptText, attachmentNames = []) {
+  const lines = [`${String(questionId || "").trim()}: ${String(promptText || "").trim()}`];
+
+  if (attachmentNames.length) {
+    lines.push(`Uploaded image${attachmentNames.length === 1 ? "" : "s"}: ${attachmentNames.join(", ")}`);
+  }
+
+  return lines.join("\n");
+}
+
+function buildComposerQueryText(message = "", imageCount = 0) {
+  const normalizedMessage = String(message || "").trim();
+
+  if (normalizedMessage) {
+    return normalizedMessage;
+  }
+
+  return imageCount === 1
+    ? "Analyze the uploaded image and answer based on its contents."
+    : "Analyze the uploaded images and answer based on their contents.";
+}
+
+function resolveThemeColor(cssVariableName) {
+  if (typeof window === "undefined" || !cssVariableName) {
+    return `var(${cssVariableName})`;
+  }
+
+  const value = window.getComputedStyle(document.documentElement).getPropertyValue(cssVariableName).trim();
+  return value || `var(${cssVariableName})`;
+}
+
+function getInsightsLineInlineStyle(lineType = "plain") {
+  if (lineType === "question") {
+    return {
+      color: resolveThemeColor("--primary"),
+      fontWeight: 700,
+      fontFamily: 'Bahnschrift, "Segoe UI", sans-serif',
+      fontSize: "24px",
+    };
+  }
+
+  if (lineType === "heading") {
+    return {
+      color: resolveThemeColor("--warning"),
+      fontWeight: 700,
+      fontSize: "20px",
+      lineHeight: "var(--workspace-insights-line-height-px)",
+    };
+  }
+
+  if (lineType === "subheading") {
+    return {
+      color: resolveThemeColor("--success"),
+      fontWeight: 700,
+      fontSize: "20px",
+      lineHeight: "var(--workspace-insights-line-height-px)",
+    };
+  }
+
+  return undefined;
+}
+
 function getProfileInitials(email = "") {
   const normalized = String(email).trim();
 
@@ -430,12 +531,12 @@ function buildGeneratedQuestionsDownloadText(questions = []) {
   return `${questionLines.join("\n").trim()}\n\n${questionAnswerLines.join("\n").trim()}`.trim();
 }
 
-function getActivityState(isListening, transcriptLines) {
+function getActivityState(isListening, transcriptText) {
   if (isListening) {
     return "Listening";
   }
 
-  if (transcriptLines.length) {
+  if (String(transcriptText || "").trim()) {
     return "Stopped";
   }
 
@@ -630,6 +731,143 @@ function PreviewModal({ file, isOpen, previewUrl, onClose }) {
   );
 }
 
+function DocumentDomainModal({ file, isOpen, value, error, onChange, onClose, onContinue }) {
+  if (!isOpen) {
+    return null;
+  }
+
+  return (
+    <div className="workspace-modal workspace-modal-domain" onClick={(event) => event.target === event.currentTarget && onClose()}>
+      <div
+        className="workspace-modal-card workspace-domain-modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="workspace-domain-modal-title"
+      >
+        <div className="workspace-modal-header workspace-domain-modal-header">
+          <div className="workspace-modal-title-wrap">
+            <div className="workspace-modal-title workspace-domain-modal-title" id="workspace-domain-modal-title">
+              <span className="workspace-domain-modal-title-mark" aria-hidden="true">
+                *
+              </span>
+              <span>Enter Domain</span>
+            </div>
+            <div className="workspace-modal-subtitle">Domain confirmation is required before upload.</div>
+          </div>
+
+          <button type="button" className="workspace-modal-close" onClick={onClose} aria-label="Close domain prompt">
+            X
+          </button>
+        </div>
+
+        <form
+          className="workspace-modal-body workspace-domain-modal-body"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onContinue();
+          }}
+        >
+          <div className="workspace-domain-modal-intro">
+            <span className="workspace-domain-modal-badge"></span>
+            <p>
+              Enter the domain for this document. The document will only be uploaded after you confirm it.
+            </p>
+          </div>
+
+          <div className="workspace-domain-modal-file-card">
+            <span className="workspace-domain-modal-file-label">Selected document</span>
+            <strong>{file?.name || "No file selected"}</strong>
+          </div>
+
+          <label className="workspace-domain-field">
+            <span className="workspace-domain-field-label">Domain</span>
+            <input
+              className="workspace-domain-input"
+              type="text"
+              value={value}
+              onChange={(event) => onChange(event.target.value)}
+              placeholder="Example: Data Science"
+              autoFocus
+            />
+          </label>
+
+          {error ? (
+            <div className="workspace-domain-field-error" role="alert">
+              {error}
+            </div>
+          ) : null}
+
+          <div className="workspace-domain-modal-actions">
+            <button type="button" className="workspace-domain-btn workspace-domain-btn-secondary" onClick={onClose}>
+              Cancel
+            </button>
+            <button type="submit" className="workspace-domain-btn workspace-domain-btn-primary">
+              Continue
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function DomainConfirmationModal({ file, isOpen, domain, onClose, onNo, onYes }) {
+  if (!isOpen) {
+    return null;
+  }
+
+  return (
+    <div className="workspace-modal workspace-modal-domain" onClick={(event) => event.target === event.currentTarget && onClose()}>
+      <div
+        className="workspace-modal-card workspace-domain-modal-card workspace-domain-confirm-modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="workspace-domain-confirm-title"
+      >
+        <div className="workspace-modal-header workspace-domain-modal-header">
+          <div className="workspace-modal-title-wrap">
+            <div className="workspace-modal-title" id="workspace-domain-confirm-title">
+              Please confirm your domain
+            </div>
+            <div className="workspace-modal-subtitle"></div>
+          </div>
+
+          <button type="button" className="workspace-modal-close" onClick={onClose} aria-label="Close domain confirmation">
+            X
+          </button>
+        </div>
+
+        <div className="workspace-modal-body workspace-domain-modal-body">
+          <div className="workspace-domain-confirm-copy">
+            <span className="workspace-domain-modal-badge workspace-domain-modal-badge-confirm">Confirmation</span>
+            <p>Please confirm the domain before the workspace resets and document processing begins.</p>
+          </div>
+
+          <div className="workspace-domain-confirm-grid">
+            <div className="workspace-domain-confirm-card">
+              <span className="workspace-domain-modal-file-label">Selected document</span>
+              <strong>{file?.name || "No file selected"}</strong>
+            </div>
+            <div className="workspace-domain-confirm-card workspace-domain-confirm-card-accent">
+              <span className="workspace-domain-modal-file-label">Selected domain</span>
+              <strong>{domain || "No domain entered"}</strong>
+            </div>
+          </div>
+
+          <div className="workspace-domain-modal-actions workspace-domain-modal-actions-confirm">
+            <button type="button" className="workspace-domain-btn workspace-domain-btn-secondary" onClick={onNo}>
+              No
+            </button>
+            <button type="button" className="workspace-domain-btn workspace-domain-btn-primary" onClick={onYes}>
+              Yes
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function UserWorkspacePage() {
   usePageMeta("Voxscribe Workspace");
 
@@ -681,8 +919,10 @@ function UserWorkspacePage() {
   const [interimTranscript, setInterimTranscript] = useState(() => String(initialWorkspaceSnapshot.interimTranscript || ""));
   const [rightText, setRightText] = useState(() => String(initialWorkspaceSnapshot.rightText || ""));
   const [messageInput, setMessageInput] = useState(() => String(initialWorkspaceSnapshot.messageInput || ""));
-  const [composerFile, setComposerFile] = useState(null);
+  const [composerFiles, setComposerFiles] = useState([]);
   const [composerError, setComposerError] = useState("");
+  const [composerUploadPending, setComposerUploadPending] = useState(false);
+  const [smartInputResponsePending, setSmartInputResponsePending] = useState(false);
   const [transcriptFile, setTranscriptFile] = useState(null);
   const [transcriptFileName, setTranscriptFileName] = useState(
     () => String(initialWorkspaceSnapshot.transcriptFileName || "").trim(),
@@ -700,6 +940,11 @@ function UserWorkspacePage() {
 
     return initialWorkspaceSnapshot.smartInputKbReady !== false;
   });
+  const [pendingTranscriptUploadFile, setPendingTranscriptUploadFile] = useState(null);
+  const [documentDomainDraft, setDocumentDomainDraft] = useState("");
+  const [documentDomainError, setDocumentDomainError] = useState("");
+  const [isDocumentDomainModalOpen, setIsDocumentDomainModalOpen] = useState(false);
+  const [isDocumentDomainConfirmOpen, setIsDocumentDomainConfirmOpen] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewUrl, setPreviewUrl] = useState("");
   const [logoutPending, setLogoutPending] = useState(false);
@@ -735,22 +980,21 @@ function UserWorkspacePage() {
   const activeTranscriptSourceRef = useRef(null);
   const questionDropdownRef = useRef(null);
   const insightsShellRef = useRef(null);
-  const insightsHighlightRef = useRef(null);
-  const insightsTextareaRef = useRef(null);
+  const insightsContentRef = useRef(null);
   const pendingInsightsCenterQuestionIdRef = useRef("");
 
-  const transcriptText = joinTranscriptSegments(transcriptLines);
   const questionLabel = `Q${questionNumber}`;
   const questionBodyTextRaw = `${finalTranscript}${finalTranscript && interimTranscript ? " " : ""}${interimTranscript}`;
   const questionBodyText = questionBodyTextRaw.trim();
-  const generatedQuestionText = questionBodyText ? `${questionLabel}: ${questionBodyText}` : "";
-  const activityState = getActivityState(isListening, transcriptLines);
+  const activityState = getActivityState(isListening, questionBodyTextRaw);
   const activityIndicator = activityMessage.type === "success" ? "\u2713" : activityMessage.type === "error" ? "!" : "i";
   const profileInitials = getProfileInitials(sessionUser?.email);
   const selectedTranscriptFileName = String(transcriptFile?.name || transcriptFileName || "").trim();
+  const selectedDocumentDomain = normalizeDomainValue(documentDomainDraft);
   const selectedGeneratedQuestion =
     generatedQuestions.find((question) => question.id === selectedGeneratedQuestionId) || null;
   const insightsHighlightLines = getInsightsHighlightLines(rightText);
+  const composerFileNames = composerFiles.map((file) => getComposerFileLabel(file)).filter(Boolean);
 
   const setActivityStatus = (text, type = "info") => {
     setActivityMessage({ text, type });
@@ -774,14 +1018,13 @@ function UserWorkspacePage() {
 
   const centerInsightsQuestionBlock = (questionId) => {
     const normalizedQuestionId = String(questionId || "").trim();
-    const highlightLayer = insightsHighlightRef.current;
-    const insightsTextarea = insightsTextareaRef.current;
+    const insightsContent = insightsContentRef.current;
 
-    if (!normalizedQuestionId || !highlightLayer || !insightsTextarea) {
+    if (!normalizedQuestionId || !insightsContent) {
       return false;
     }
 
-    const targetNode = Array.from(highlightLayer.querySelectorAll("[data-insights-question-id]")).find(
+    const targetNode = Array.from(insightsContent.querySelectorAll("[data-insights-question-id]")).find(
       (node) => node.dataset.insightsQuestionId === normalizedQuestionId,
     );
 
@@ -789,15 +1032,14 @@ function UserWorkspacePage() {
       return false;
     }
 
-    const desiredViewportOffset = insightsTextarea.clientHeight * INSIGHTS_NEW_QUESTION_VIEWPORT_OFFSET_RATIO;
-    const maxScrollTop = Math.max(0, insightsTextarea.scrollHeight - insightsTextarea.clientHeight);
+    const desiredViewportOffset = insightsContent.clientHeight * INSIGHTS_NEW_QUESTION_VIEWPORT_OFFSET_RATIO;
+    const maxScrollTop = Math.max(0, insightsContent.scrollHeight - insightsContent.clientHeight);
     const targetScrollTop = Math.min(
       maxScrollTop,
       Math.max(0, targetNode.offsetTop + targetNode.offsetHeight / 2 - desiredViewportOffset),
     );
 
-    insightsTextarea.scrollTop = targetScrollTop;
-    highlightLayer.scrollTop = targetScrollTop;
+    insightsContent.scrollTop = targetScrollTop;
     return true;
   };
 
@@ -1406,14 +1648,13 @@ function UserWorkspacePage() {
       return undefined;
     }
 
-    const highlightLayer = insightsHighlightRef.current;
-    const insightsTextarea = insightsTextareaRef.current;
+    const insightsContent = insightsContentRef.current;
 
-    if (!highlightLayer || !insightsTextarea) {
+    if (!insightsContent) {
       return undefined;
     }
 
-    const targetNode = Array.from(highlightLayer.querySelectorAll("[data-insights-question-id]")).find(
+    const targetNode = Array.from(insightsContent.querySelectorAll("[data-insights-question-id]")).find(
       (node) => node.dataset.insightsQuestionId === pendingQuestionId,
     );
 
@@ -1423,7 +1664,7 @@ function UserWorkspacePage() {
 
     const reservePx = Math.max(
       0,
-      insightsTextarea.clientHeight * (1 - INSIGHTS_NEW_QUESTION_VIEWPORT_OFFSET_RATIO) - targetNode.offsetHeight / 2,
+      insightsContent.clientHeight * (1 - INSIGHTS_NEW_QUESTION_VIEWPORT_OFFSET_RATIO) - targetNode.offsetHeight / 2,
     );
     setInsightsScrollReserve(reservePx);
 
@@ -1548,15 +1789,6 @@ function UserWorkspacePage() {
     await startCapture();
   };
 
-  const syncInsightsScroll = (event) => {
-    if (!insightsHighlightRef.current) {
-      return;
-    }
-
-    insightsHighlightRef.current.scrollTop = event.target.scrollTop;
-    insightsHighlightRef.current.scrollLeft = event.target.scrollLeft;
-  };
-
   const startPanelResize = (clientX) => {
     if (!workspaceMainRef.current || window.innerWidth <= WORKSPACE_PANEL_RESIZE_BREAKPOINT) {
       return;
@@ -1629,8 +1861,10 @@ function UserWorkspacePage() {
     setInterimTranscript("");
     setRightText("");
     setMessageInput("");
-    setComposerFile(null);
+    setComposerFiles([]);
     setComposerError("");
+    setComposerUploadPending(false);
+    setSmartInputResponsePending(false);
     setTranscriptFile(null);
     setTranscriptFileName("");
     setSmartInputKbFilePath("");
@@ -1644,11 +1878,17 @@ function UserWorkspacePage() {
     }
   };
 
+  const resetPendingTranscriptUploadFlow = () => {
+    setPendingTranscriptUploadFile(null);
+    setDocumentDomainDraft("");
+    setDocumentDomainError("");
+    setIsDocumentDomainModalOpen(false);
+    setIsDocumentDomainConfirmOpen(false);
+  };
+
   const handleStop = () => {
     closeTranscriptStream({ markClosed: true, sendStopSignal: true });
     teardownScreenAudioPipeline();
-    setFinalTranscript("");
-    setInterimTranscript("");
     setIsListening(false);
     setActivityStatus("Live stopped.", "info");
   };
@@ -1696,11 +1936,20 @@ function UserWorkspacePage() {
     setActivityStatus("Questions and generated answers downloaded.", "success");
   };
 
-  const handleGenerate = async () => {
-    const transcriptText = questionBodyText.trim();
+  const streamSmartInputAnswer = async ({
+    queryText,
+    questionText,
+    questionSummary,
+    attachmentNames = [],
+    imageFilePaths = [],
+    resetTranscript = false,
+    resetComposer = false,
+    pendingStatusText = "Generating answer...",
+  }) => {
+    const normalizedQuery = String(queryText || "").trim();
 
-    if (!transcriptText) {
-      setActivityStatus("No transcript available to generate.", "info");
+    if (!normalizedQuery) {
+      setActivityStatus("A query is required before generating an answer.", "info");
       return;
     }
 
@@ -1714,10 +1963,17 @@ function UserWorkspacePage() {
       return;
     }
 
+    if (smartInputResponsePending) {
+      setActivityStatus("Please wait for the current answer generation to finish.", "info");
+      return;
+    }
+
+    const generatedQuestionId = questionLabel;
+    const questionEntryText = buildQuestionEntryText(generatedQuestionId, questionText, attachmentNames);
     const generatedQuestion = {
-      id: questionLabel,
-      label: `${questionLabel} : ${transcriptText}`,
-      text: generatedQuestionText,
+      id: generatedQuestionId,
+      label: buildQuestionLabel(generatedQuestionId, questionSummary || questionText),
+      text: questionEntryText,
       answer: "",
       error: "",
     };
@@ -1725,23 +1981,41 @@ function UserWorkspacePage() {
     pendingInsightsCenterQuestionIdRef.current = generatedQuestion.id;
     setRightText((current) => {
       const existingText = String(current || "").trim();
-      return existingText ? `${existingText}\n\n${generatedQuestionText}` : generatedQuestionText;
+      const nextQuestionBlock = `${questionEntryText}\n\n`;
+      return existingText ? `${existingText}\n\n${nextQuestionBlock}` : nextQuestionBlock;
     });
     setGeneratedQuestions((current) => [...current, generatedQuestion]);
     setSelectedGeneratedQuestionId(generatedQuestion.id);
     setIsQuestionDropdownOpen(false);
-    setTranscriptLines([]);
-    setFinalTranscript("");
-    setInterimTranscript("");
+
+    if (resetTranscript) {
+      setTranscriptLines([]);
+      setFinalTranscript("");
+      setInterimTranscript("");
+    }
+
+    if (resetComposer) {
+      setMessageInput("");
+      setComposerFiles([]);
+      if (composerFileInputRef.current) {
+        composerFileInputRef.current.value = "";
+      }
+    }
+
     setQuestionNumber((current) => current + 1);
-    setActivityStatus("Transcript moved into Insights. Generating answer...", "info");
+    setSmartInputResponsePending(true);
+    setActivityStatus(pendingStatusText, "info");
 
     try {
       const tabToken = getOrCreateTabToken();
-      const requestBody = { query: transcriptText };
+      const requestBody = { query: normalizedQuery };
       if (smartInputKbFilePath) {
         requestBody.files = [smartInputKbFilePath];
       }
+      if (imageFilePaths.length) {
+        requestBody.imageFiles = imageFilePaths;
+      }
+
       const streamResponse = await fetch("/api/smart-input/stream", {
         method: "POST",
         headers: {
@@ -1770,11 +2044,6 @@ function UserWorkspacePage() {
         return;
       }
 
-      setRightText((current) => {
-        const existingText = String(current || "");
-        return existingText ? `${existingText}\n\n` : "";
-      });
-
       const reader = streamResponse.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
@@ -1788,7 +2057,6 @@ function UserWorkspacePage() {
 
         buffer += decoder.decode(value, { stream: true });
 
-        // SSE messages are delimited by a blank line.
         while (true) {
           const separatorIndex = buffer.indexOf("\n\n");
           if (separatorIndex === -1) {
@@ -1849,7 +2117,26 @@ function UserWorkspacePage() {
         current.map((question) => (question.id === generatedQuestion.id ? { ...question, error: message } : question)),
       );
       setActivityStatus(message, "error");
+    } finally {
+      setSmartInputResponsePending(false);
     }
+  };
+
+  const handleGenerate = async () => {
+    const transcriptText = questionBodyText.trim();
+
+    if (!transcriptText) {
+      setActivityStatus("No transcript available to generate.", "info");
+      return;
+    }
+
+    await streamSmartInputAnswer({
+      queryText: transcriptText,
+      questionText: transcriptText,
+      questionSummary: transcriptText,
+      resetTranscript: true,
+      pendingStatusText: "Transcript moved into Insights. Generating answer...",
+    });
   };
 
   const handleSmartInputKeyDown = (event) => {
@@ -2019,13 +2306,13 @@ function UserWorkspacePage() {
     }
   };
 
-  const uploadSmartInputDocument = async (file) => {
+  const uploadSmartInputAsset = async (file, { statusText = "Uploading Smart Input file..." } = {}) => {
     if (!file) {
       return "";
     }
 
     setSmartInputUploadPending(true);
-    setActivityStatus("Uploading Smart Input document...", "info");
+    setActivityStatus(statusText, "info");
 
     try {
       const tabToken = getOrCreateTabToken();
@@ -2060,18 +2347,19 @@ function UserWorkspacePage() {
         throw new Error("Upload succeeded, but backend did not return a file path.");
       }
 
-      setActivityStatus("Smart Input document uploaded.", "success");
       return uploadedPath;
     } finally {
       setSmartInputUploadPending(false);
     }
   };
 
-  const ingestSmartInputDocument = async (uploadedPath) => {
+  const ingestSmartInputDocument = async (uploadedPath, domain = "") => {
     const filePath = String(uploadedPath || "").trim();
     if (!filePath) {
       return;
     }
+
+    const normalizedDomain = normalizeDomainValue(domain);
 
     setSmartInputIngestPending(true);
     setSmartInputKbReady(false);
@@ -2086,7 +2374,7 @@ function UserWorkspacePage() {
           "Content-Type": "application/json",
           "x-voxscribe-tab": tabToken,
         },
-        body: JSON.stringify({ files: [filePath] }),
+        body: JSON.stringify({ files: [filePath], domain: normalizedDomain }),
       });
 
       const payloadText = await response.text();
@@ -2112,38 +2400,24 @@ function UserWorkspacePage() {
     }
   };
 
-  const handleTranscriptFileChange = async (event) => {
-    const file = event.target.files?.[0] || null;
+  const processTranscriptDocumentUpload = async (file, domain) => {
+    const selectedFile = file || null;
+    const normalizedDomain = normalizeDomainValue(domain);
 
-    if (!file) {
-      setTranscriptFile(null);
-      setTranscriptFileName("");
-      setSmartInputKbFilePath("");
-      setSmartInputKbReady(true);
-      setActivityStatus("No transcript document selected.", "info");
-      return;
-    }
-
-    if (!isAllowedTranscriptFile(file)) {
-      event.target.value = "";
-      setTranscriptFile(null);
-      setTranscriptFileName("");
-      setSmartInputKbFilePath("");
-      setSmartInputKbReady(true);
-      setActivityStatus("Only DOC, DOCX, and PDF files are allowed for transcript upload.", "error");
+    if (!selectedFile || !normalizedDomain) {
       return;
     }
 
     resetWorkspaceForNewDocument();
-    setTranscriptFile(file);
-    setTranscriptFileName(String(file.name || "").trim());
+    setTranscriptFile(selectedFile);
+    setTranscriptFileName(String(selectedFile.name || "").trim());
     setSmartInputKbReady(false);
     let uploadedPath = "";
 
     try {
-      uploadedPath = await uploadSmartInputDocument(file);
+      uploadedPath = await uploadSmartInputAsset(selectedFile, { statusText: "Uploading Smart Input document..." });
       setSmartInputKbFilePath(uploadedPath);
-      await ingestSmartInputDocument(uploadedPath);
+      await ingestSmartInputDocument(uploadedPath, normalizedDomain);
     } catch (error) {
       setSmartInputKbFilePath("");
       setSmartInputKbReady(false);
@@ -2156,58 +2430,141 @@ function UserWorkspacePage() {
     }
   };
 
-  const handleComposerFileChange = (event) => {
+  const handleTranscriptFileChange = (event) => {
     const file = event.target.files?.[0] || null;
-    setComposerFile(file);
+    event.target.value = "";
+
+    if (!file) {
+      return;
+    }
+
+    if (!isAllowedTranscriptFile(file)) {
+      setActivityStatus("Only DOC, DOCX, and PDF files are allowed for transcript upload.", "error");
+      return;
+    }
+
+    setPendingTranscriptUploadFile(file);
+    setDocumentDomainDraft("");
+    setDocumentDomainError("");
+    setIsDocumentDomainConfirmOpen(false);
+    setIsDocumentDomainModalOpen(true);
+  };
+
+  const handleDocumentDomainContinue = () => {
+    if (!pendingTranscriptUploadFile) {
+      resetPendingTranscriptUploadFlow();
+      return;
+    }
+
+    const normalizedDomain = normalizeDomainValue(documentDomainDraft);
+    if (!normalizedDomain) {
+      setDocumentDomainError("Domain is required before the document can be uploaded.");
+      return;
+    }
+
+    setDocumentDomainDraft(normalizedDomain);
+    setDocumentDomainError("");
+    setIsDocumentDomainModalOpen(false);
+    setIsDocumentDomainConfirmOpen(true);
+  };
+
+  const handleConfirmedTranscriptUpload = async () => {
+    const fileToUpload = pendingTranscriptUploadFile;
+    const confirmedDomain = normalizeDomainValue(documentDomainDraft);
+
+    if (!fileToUpload) {
+      resetPendingTranscriptUploadFlow();
+      return;
+    }
+
+    if (!confirmedDomain) {
+      setIsDocumentDomainConfirmOpen(false);
+      setIsDocumentDomainModalOpen(true);
+      setDocumentDomainError("Domain is required before the document can be uploaded.");
+      return;
+    }
+
+    resetPendingTranscriptUploadFlow();
+    await processTranscriptDocumentUpload(fileToUpload, confirmedDomain);
+  };
+
+  const appendComposerFiles = (incomingFiles = []) => {
+    const nextFiles = Array.isArray(incomingFiles) ? incomingFiles.filter(Boolean) : [];
+    if (!nextFiles.length) {
+      return;
+    }
+
+    if (nextFiles.some((file) => !isAllowedComposerImage(file))) {
+      setComposerError("Only PNG, JPG, JPEG, and WEBP images are allowed in the message field.");
+      return;
+    }
+
+    const mergedFiles = [...composerFiles, ...nextFiles];
+    setComposerFiles(clampComposerImageFiles(mergedFiles));
+    setComposerError(mergedFiles.length > COMPOSER_IMAGE_LIMIT ? `You can upload up to ${COMPOSER_IMAGE_LIMIT} images per message.` : "");
+  };
+
+  const handleComposerFileChange = (event) => {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    appendComposerFiles(files);
+  };
+
+  const handleRemoveComposerFile = (targetIndex) => {
+    setComposerFiles((current) => current.filter((_, index) => index !== targetIndex));
     setComposerError("");
   };
 
-  const handleSend = () => {
+  const handleSend = async () => {
     const message = messageInput.trim();
+    const selectedComposerFiles = [...composerFiles];
 
-    if (!message && !composerFile) {
-      setComposerError("Type a message or choose a file before sending.");
+    if (!message && !selectedComposerFiles.length) {
+      setComposerError("Type a message or choose image files before sending.");
+      return;
+    }
+
+    if (composerUploadPending) {
+      setActivityStatus("Please wait for the image upload to finish.", "info");
       return;
     }
 
     setComposerError("");
 
-    setTranscriptLines((current) => {
-      const next = [...current];
-      const composerFileLabel = getComposerFileLabel(composerFile);
+    const attachmentNames = selectedComposerFiles.map((file) => getComposerFileLabel(file)).filter(Boolean);
+    const queryText = buildComposerQueryText(message, selectedComposerFiles.length);
+    const questionSummary = message || attachmentNames.join(", ") || queryText;
+    const uploadedImagePaths = [];
 
-      if (message) {
-        next.push(createTranscriptLine(message, "You"));
+    try {
+      if (selectedComposerFiles.length) {
+        setComposerUploadPending(true);
+
+        for (let index = 0; index < selectedComposerFiles.length; index += 1) {
+          const file = selectedComposerFiles[index];
+          const uploadPath = await uploadSmartInputAsset(file, {
+            statusText: `Uploading image ${index + 1} of ${selectedComposerFiles.length}...`,
+          });
+          uploadedImagePaths.push(uploadPath);
+        }
       }
+    } catch (error) {
+      const errorMessage = String(error?.message || "Unable to upload message images.");
+      setActivityStatus(errorMessage, "error");
+      return;
+    } finally {
+      setComposerUploadPending(false);
+    }
 
-      if (composerFile) {
-        next.push(createTranscriptLine(composerFileLabel, "File uploaded"));
-      }
-
-      return next;
+    await streamSmartInputAnswer({
+      queryText,
+      questionText: queryText,
+      questionSummary,
+      attachmentNames,
+      imageFilePaths: uploadedImagePaths,
+      resetComposer: true,
+      pendingStatusText: "Message sent to Insights. Generating answer...",
     });
-
-    if (message) {
-      setRightText((current) => {
-        const existingText = String(current || "").trim();
-        return existingText ? `${existingText}\n\n${message}` : message;
-      });
-    }
-
-    if (composerFile) {
-      setRightText((current) => {
-        const existingText = String(current || "").trim();
-        const fileMessage = `Uploaded file: ${getComposerFileLabel(composerFile)}`;
-        return existingText ? `${existingText}\n\n${fileMessage}` : fileMessage;
-      });
-    }
-
-    setMessageInput("");
-    setComposerFile(null);
-
-    if (composerFileInputRef.current) {
-      composerFileInputRef.current.value = "";
-    }
   };
 
   const handleLogout = async () => {
@@ -2576,7 +2933,13 @@ function UserWorkspacePage() {
                   type="button"
                   className="workspace-dark-btn workspace-transcript-action-btn workspace-generate-btn"
                   onClick={handleGenerate}
-                  disabled={smartInputUploadPending || smartInputIngestPending || (smartInputKbFilePath && !smartInputKbReady)}
+                  disabled={
+                    smartInputUploadPending ||
+                    smartInputIngestPending ||
+                    smartInputResponsePending ||
+                    composerUploadPending ||
+                    (smartInputKbFilePath && !smartInputKbReady)
+                  }
                 >
                   <span className="workspace-generate-btn-icon" aria-hidden="true">
                     ✦
@@ -2590,7 +2953,8 @@ function UserWorkspacePage() {
                   type="button"
                   className="workspace-mini-btn"
                   onClick={() => composerFileInputRef.current?.click()}
-                  title="Attach file"
+                  title="Attach images"
+                  disabled={composerUploadPending || smartInputResponsePending}
                 >
                   <svg
                     className="workspace-composer-upload-icon"
@@ -2615,17 +2979,17 @@ function UserWorkspacePage() {
                     setComposerError("");
                   }}
                   onPaste={(event) => {
-                    const clipboardItems = Array.from(event.clipboardData?.items || []);
-                    const imageItem = clipboardItems.find((item) => item.kind === "file" && item.type.startsWith("image/"));
-                    const pastedImage = imageItem?.getAsFile() || null;
+                    const pastedImages = Array.from(event.clipboardData?.items || [])
+                      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+                      .map((item) => item.getAsFile())
+                      .filter(Boolean);
 
-                    if (!pastedImage) {
+                    if (!pastedImages.length) {
                       return;
                     }
 
                     event.preventDefault();
-                    setComposerFile(pastedImage);
-                    setComposerError("");
+                    appendComposerFiles(pastedImages);
                   }}
                   onKeyDown={(event) => {
                     if (
@@ -2637,20 +3001,24 @@ function UserWorkspacePage() {
                       !event.nativeEvent.isComposing
                     ) {
                       event.preventDefault();
-                      handleSend();
+                      void handleSend();
                     }
                   }}
                   className="workspace-message-input"
-                  placeholder="Upload image or Add your Query..."
+                  placeholder="Add your query or Upload image..."
                   aria-invalid={Boolean(composerError)}
+                  disabled={composerUploadPending || smartInputResponsePending}
                 />
 
                 <button
                   type="button"
                   className="workspace-send-btn"
-                  onClick={handleSend}
+                  onClick={() => {
+                    void handleSend();
+                  }}
                   aria-label="Send"
                   title="Send"
+                  disabled={composerUploadPending || smartInputResponsePending}
                 >
                   <svg
                     className="workspace-send-icon"
@@ -2668,14 +3036,42 @@ function UserWorkspacePage() {
                   </svg>
                 </button>
 
-                <input ref={composerFileInputRef} type="file" hidden onChange={handleComposerFileChange} />
+                <input
+                  ref={composerFileInputRef}
+                  type="file"
+                  accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp"
+                  multiple
+                  hidden
+                  onChange={handleComposerFileChange}
+                />
               </div>
 
               {composerError && <div className="workspace-composer-error">{composerError}</div>}
 
               <div className="workspace-file-name">
-                {composerFile ? `Selected file: ${getComposerFileLabel(composerFile)}` : "No file selected"}
+                {composerFileNames.length
+                  ? `Selected image${composerFileNames.length === 1 ? "" : "s"}: ${composerFileNames.join(", ")}`
+                  : "No image selected"}
               </div>
+
+              {composerFileNames.length ? (
+                <div className="workspace-composer-attachments" aria-label="Selected message images">
+                  {composerFileNames.map((fileName, index) => (
+                    <span key={`${fileName}-${index}`} className="workspace-composer-attachment-chip">
+                      <span className="workspace-composer-attachment-name">{fileName}</span>
+                      <button
+                        type="button"
+                        className="workspace-composer-attachment-remove"
+                        onClick={() => handleRemoveComposerFile(index)}
+                        aria-label={`Remove ${fileName}`}
+                        title={`Remove ${fileName}`}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              ) : null}
             </section>
           </div>
 
@@ -2699,12 +3095,17 @@ function UserWorkspacePage() {
             </div>
 
             <div ref={insightsShellRef} className="workspace-insights-shell">
-              <div ref={insightsHighlightRef} className="workspace-insights-highlight" aria-hidden="true">
+              <div
+                ref={insightsContentRef}
+                className={`workspace-insights-box${rightText ? " workspace-insights-box-has-value" : ""}`}
+                tabIndex={0}
+              >
                 {insightsHighlightLines.length ? (
                   insightsHighlightLines.map((line, index) => (
                     <span
                       key={`${line.type}-${index}`}
                       data-insights-question-id={line.questionId}
+                      style={getInsightsLineInlineStyle(line.type)}
                       className={`workspace-insights-highlight-line${
                         line.type === "question"
                           ? " workspace-insights-highlight-question"
@@ -2724,20 +3125,35 @@ function UserWorkspacePage() {
                   <span className="workspace-insights-highlight-empty"> </span>
                 )}
               </div>
-
-              <textarea
-                ref={insightsTextareaRef}
-                value={rightText}
-                onChange={(event) => setRightText(event.target.value)}
-                onScroll={syncInsightsScroll}
-                className={`workspace-insights-box${rightText ? " workspace-insights-box-has-value" : ""}`}
-                placeholder=""
-              />
             </div>
           </section>
         </div>
       </div>
 
+      <DocumentDomainModal
+        file={pendingTranscriptUploadFile}
+        isOpen={isDocumentDomainModalOpen}
+        value={documentDomainDraft}
+        error={documentDomainError}
+        onChange={(value) => {
+          setDocumentDomainDraft(value);
+          if (documentDomainError) {
+            setDocumentDomainError("");
+          }
+        }}
+        onClose={resetPendingTranscriptUploadFlow}
+        onContinue={handleDocumentDomainContinue}
+      />
+      <DomainConfirmationModal
+        file={pendingTranscriptUploadFile}
+        isOpen={isDocumentDomainConfirmOpen}
+        domain={selectedDocumentDomain}
+        onClose={resetPendingTranscriptUploadFlow}
+        onNo={resetPendingTranscriptUploadFlow}
+        onYes={() => {
+          void handleConfirmedTranscriptUpload();
+        }}
+      />
       <PreviewModal
         file={transcriptFile}
         isOpen={previewOpen}

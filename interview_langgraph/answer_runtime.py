@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
+from pathlib import Path
 
 from openai import OpenAI
 
@@ -27,6 +29,12 @@ from interview_langgraph.route.router import route_node
 VALID_ROUTES = {"introduction", "project_explaination", "code", "scenario", "qa"}
 DEFAULT_TEMPERATURE = 0.7
 DEFAULT_MAX_TOKENS = 5000
+SUPPORTED_IMAGE_MIME_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
 _INTRO_SEED_QUERIES: tuple[str, ...] = (
     "professional summary",
     "summary",
@@ -52,7 +60,7 @@ class PreparedAnswerRequest:
     top_k: int
     context_chunks: list[str]
     model: str
-    messages: list[dict[str, str]]
+    messages: list[dict[str, object]]
     temperature: float = DEFAULT_TEMPERATURE
     max_tokens: int = DEFAULT_MAX_TOKENS
 
@@ -73,7 +81,7 @@ def resolve_top_k(top_k: int | None) -> int:
 def iter_openai_chat_deltas(
     *,
     model: str,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, object]],
     temperature: float,
     max_tokens: int,
 ):
@@ -152,25 +160,70 @@ def build_intro_context_chunks(*, query: str, top_k: int) -> list[str]:
     return out or texts[:top_k]
 
 
+def build_image_message_parts(image_files: list[str] | None = None) -> list[dict[str, object]]:
+    parts: list[dict[str, object]] = []
+
+    for image_path in image_files or []:
+        path = Path(str(image_path or "")).expanduser()
+        suffix = path.suffix.lower()
+        mime_type = SUPPORTED_IMAGE_MIME_TYPES.get(suffix)
+
+        if not mime_type or not path.is_file():
+            continue
+
+        try:
+            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        except Exception:
+            continue
+
+        parts.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime_type};base64,{encoded}"},
+            }
+        )
+
+    return parts
+
+
+def build_user_message_content(text: str, image_files: list[str] | None = None) -> str | list[dict[str, object]]:
+    normalized_text = str(text or "").strip()
+    image_parts = build_image_message_parts(image_files)
+
+    if not image_parts:
+        return normalized_text
+
+    return [{"type": "text", "text": normalized_text}, *image_parts]
+
+
 def build_messages_for_route(
     *,
     route: str,
     query: str,
     context_chunks: list[str],
     history: list[dict[str, str]] | None = None,
-) -> tuple[str, list[dict[str, str]], float, int]:
+    image_files: list[str] | None = None,
+) -> tuple[str, list[dict[str, object]], float, int]:
     normalized_route = _normalize_route(route)
     context = "\n\n".join(context_chunks).strip()
-    messages: list[dict[str, str]] = []
+    messages: list[dict[str, object]] = []
 
     if normalized_route == "code":
         system_prompt = read_prompt(CODE_PROMPT_PATH)
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(coerce_history(history))
         if context:
-            messages.append({"role": "user", "content": f"Reference context:\n{context}\n\nQuestion:\n{query}"})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": build_user_message_content(
+                        f"Reference context:\n{context}\n\nQuestion:\n{query}",
+                        image_files=image_files,
+                    ),
+                }
+            )
         else:
-            messages.append({"role": "user", "content": query})
+            messages.append({"role": "user", "content": build_user_message_content(query, image_files=image_files)})
         return CODE_MODEL, messages, DEFAULT_TEMPERATURE, DEFAULT_MAX_TOKENS
 
     if normalized_route == "introduction":
@@ -196,7 +249,15 @@ def build_messages_for_route(
 
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(coerce_history(history))
-    messages.append({"role": "user", "content": user_template.format(context=context, query=query)})
+    messages.append(
+        {
+            "role": "user",
+            "content": build_user_message_content(
+                user_template.format(context=context, query=query),
+                image_files=image_files,
+            ),
+        }
+    )
     return model, messages, DEFAULT_TEMPERATURE, DEFAULT_MAX_TOKENS
 
 
@@ -205,6 +266,7 @@ def prepare_answer_request(
     query: str,
     history: list[dict[str, str]] | None = None,
     top_k: int | None = None,
+    image_files: list[str] | None = None,
 ) -> PreparedAnswerRequest:
     query_text = str(query or "").strip()
     if not query_text:
@@ -226,6 +288,7 @@ def prepare_answer_request(
         query=query_text,
         context_chunks=context_chunks,
         history=history,
+        image_files=image_files,
     )
 
     return PreparedAnswerRequest(
